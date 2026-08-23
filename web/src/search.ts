@@ -197,6 +197,35 @@ export function activePath(state: SearchState): string | null {
   return state.matches[state.activeIndex] ?? null;
 }
 
+/**
+ * The path Enter would open, or null when Enter has nothing to open.
+ *
+ * Built on {@link activePath} so the index rule lives in exactly one place, and
+ * then narrowed twice, because "the camera is on it" is weaker than "the viewer
+ * can show it":
+ *
+ *  - only a walk focuses a file. `frame` is `"active"` solely because
+ *    {@link nextMatch} put it there; `"all"` means the camera is framing EVERY
+ *    match, and Enter must not open whichever one happens to sort first.
+ *  - the node must still be in the tree, and must be a file. The graph is live,
+ *    so a file can be deleted between the walk and the keystroke -- and
+ *    {@link refreshMatches} is allowed to leave the walk pointing at nothing --
+ *    while a directory is simply not something the viewer has anything to show
+ *    for: the click path only ever opens files.
+ */
+export function focusedFilePath(
+  state: SearchState,
+  nodes: readonly SearchNode[],
+): string | null {
+  if (state.frame !== "active") return null;
+
+  const path = activePath(state);
+  if (path === null) return null;
+
+  const node = nodes.find((candidate) => candidate.path === path);
+  return node !== undefined && node.kind === "file" ? path : null;
+}
+
 /** A world position the camera has to show. */
 export interface FramePoint {
   readonly x: number;

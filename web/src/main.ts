@@ -42,6 +42,7 @@ import {
   activePath,
   closeSearch,
   createSearchState,
+  focusedFilePath,
   nextMatch,
   openSearch,
   refreshMatches,
@@ -267,7 +268,12 @@ function boot(): void {
       return;
     }
 
-    const command = interpretSearchKey(event, search.open);
+    // Resolved BEFORE the binding is consulted, and handed to it: `search.ts`
+    // owns the question of what the walk is resting on, `searchKeys.ts` only
+    // reads the keyboard. It is also the path the branch below opens, so the
+    // answer is worked out once.
+    const focusedFile = focusedFilePath(search, sim.listNodes());
+    const command = interpretSearchKey(event, search.open, focusedFile !== null);
     if (!command) return;
     // ctrl+F would otherwise open the browser's own find bar, and F3 its
     // find-again; both would search the page's text instead of the graph.
@@ -284,6 +290,21 @@ function boot(): void {
       if (!search.open) showSearch(openSearch(search));
     } else if (command === "next") {
       showSearch(nextMatch(search));
+    } else if (command === "openFile") {
+      // Non-null by construction -- it is what made the binding answer openFile
+      // -- but the compiler wants it said, and a stray null must not fall
+      // through to the close branch below.
+      if (focusedFile !== null) {
+        // The same entry point the graph click and the git status row use, on
+        // purpose: one way into the panel means one thing to keep right.
+        openFile(focusedFile);
+        // Hand the keyboard to the modal. The field still holds focus, so
+        // typing and arrows would go to it rather than to the panel over the
+        // graph. The SEARCH stays open -- the highlights are still wanted and
+        // F3 keeps stepping, because the listener is on `window`, not on the
+        // field.
+        searchHud?.blur();
+      }
     } else {
       showSearch(closeSearch(search));
     }

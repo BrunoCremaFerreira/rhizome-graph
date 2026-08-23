@@ -35,6 +35,18 @@
  * not typing, so it preserves the walk -- the ACTIVE PATH, not the active index,
  * because a new match sorting before it shifts every index -- and it does not
  * close the box on an empty query.
+ *
+ * A third defect motivates `focusedFilePath`. The walk puts the camera on a file
+ * and stops there: seeing what is INSIDE the file just found means leaving the
+ * keyboard and clicking a dot in a force layout that never stops moving. Enter
+ * should open it, which requires one pure answer -- WHICH path Enter would open,
+ * or null. It is null far more often than not, and every one of those cases is a
+ * real state of this box: a query typed but never walked (`frame: "all"` focuses
+ * nothing, because the camera is framing them all), a closed box, a query that
+ * matched nothing, a walk resting on a DIRECTORY (the click path only ever opens
+ * files and the viewer has nothing to show for a directory), and -- the live
+ * graph again -- an active path that has left the tree between the walk and the
+ * keystroke, which `refreshMatches` is allowed to leave pointing at nothing.
  */
 
 import { describe, it, expect } from "vitest";
@@ -47,6 +59,7 @@ import {
   refreshMatches,
   closeSearch,
   activePath,
+  focusedFilePath,
   type SearchNode,
 } from "../src/search";
 
@@ -338,5 +351,60 @@ describe("activePath", () => {
 
   it("names nobody in a closed box", () => {
     expect(activePath(createSearchState())).toBeNull();
+  });
+});
+
+describe("focusedFilePath", () => {
+  const opened = openSearch(createSearchState());
+  const found = setQuery(opened, "view", NODES);
+
+  it("names the file the walk is resting on", () => {
+    // openSearch -> setQuery -> nextMatch is the only route to frame "active",
+    // so the state is built through the real transitions rather than by hand.
+    const walked = nextMatch(found);
+
+    expect(walked.frame).toBe("active");
+    expect(focusedFilePath(walked, NODES)).toBe("web/tests/view.test.ts");
+  });
+
+  it("follows the walk from one match to the next", () => {
+    expect(focusedFilePath(nextMatch(nextMatch(found)), NODES)).toBe("web/src/view.ts");
+  });
+
+  it("focuses nothing while the camera is still framing every match", () => {
+    // Typing a query is a question about all of them; only the F3 walk singles
+    // one out, and Enter must not open whichever file happens to sort first.
+    expect(found.frame).toBe("all");
+    expect(focusedFilePath(found, NODES)).toBeNull();
+  });
+
+  it("focuses nothing in a closed box", () => {
+    expect(focusedFilePath(createSearchState(), NODES)).toBeNull();
+  });
+
+  it("focuses nothing when the query matched nothing", () => {
+    const empty = nextMatch(setQuery(opened, "gource.cpp", NODES));
+
+    expect(focusedFilePath(empty, NODES)).toBeNull();
+  });
+
+  it("focuses nothing when the walk is resting on a directory", () => {
+    // The click path only ever opens files; the viewer has nothing to show for
+    // a directory, so Enter there must stay inert.
+    const onDirectory = nextMatch(nextMatch(setQuery(opened, "daemon", NODES)));
+
+    expect(activePath(onDirectory)).toBe("daemon");
+    expect(focusedFilePath(onDirectory, NODES)).toBeNull();
+  });
+
+  it("focuses nothing when the active path has left the tree", () => {
+    // The graph is live: the file can be deleted between the walk and the
+    // keystroke, and refreshMatches may leave activeIndex on a path that is
+    // gone. Enter must not ask the daemon for a node nobody can see.
+    const walked = nextMatch(found);
+    const gone = NODES.filter((node) => node.path !== "web/tests/view.test.ts");
+
+    expect(activePath(walked)).toBe("web/tests/view.test.ts");
+    expect(focusedFilePath(walked, gone)).toBeNull();
   });
 });

@@ -642,6 +642,22 @@ Web MVP implemented and verified end-to-end (TDD).
   `setQuery` restarts the walk by contract, which would throw an `F3` walk back to the
   overview every time a file was written. Touching the wheel disarms the camera without
   dropping the highlights; the next query or `F3` rearms it.
+- **Enter opens the file the walk is resting on.** The walk put the camera on a file and
+  stopped there, so seeing what was *inside* the file just found meant abandoning the
+  keyboard to aim at a dot in a force layout that never stops moving. `Enter` now goes
+  through the same `openFile` in `main.ts` that a click in the graph and a row in the git
+  status panel go through — one way into the panel, not three. Four things carry it:
+  **`frame === "active"` is the operational meaning of "focused"**, since `nextMatch` is the
+  only transition that sets it, so a freshly typed query (`frame: "all"`) focuses nothing and
+  `Enter` keeps its old meaning there — the key never goes dead. **Walking must never become
+  opening:** `F3` answers `"next"` whatever is focused, or stepping through a query would
+  throw a modal over the graph on every single step. **`focusedFilePath` refuses a path that
+  is no longer in the tree, or is a directory** — the graph is live, so a file can leave
+  between the walk and the keystroke, and the click path only ever opens files. And the
+  command is named `openFile` because `open` was already taken by the search box itself. The
+  box stays open behind the panel and only the *focus* moves (`SearchHud.blur`, not `close`):
+  the highlights are still wanted, and `F3` keeps stepping because the listener is on
+  `window`, not on the field.
 - **Text is not part of the glow.** Labels live in a separate `overlayScene`, drawn after
   the composer with `autoClear = false`. Every glyph pixel clears the bloom's 0.05
   threshold, so a label left in the main scene gets an additive halo that closes the

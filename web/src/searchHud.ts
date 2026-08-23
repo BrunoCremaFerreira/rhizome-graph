@@ -16,6 +16,14 @@ export interface SearchHud {
   open(): void;
   /** Hide the field and forget what was typed. */
   close(): void;
+  /**
+   * Give the keyboard back, leaving the box open and the query intact.
+   *
+   * Not {@link close}: when Enter opens the viewer the highlights are still
+   * wanted and F3 keeps stepping, so only the FOCUS moves -- otherwise the
+   * field would swallow the arrows the panel is waiting for.
+   */
+  blur(): void;
   isOpen(): boolean;
   /** What is currently typed. */
   query(): string;
@@ -48,6 +56,10 @@ export function createSearchHud(container: HTMLElement): SearchHud {
       if (countEl) countEl.textContent = "";
       // Give the keyboard back to the page: a focused field inside a hidden
       // box would keep swallowing keys.
+      input?.blur();
+    },
+
+    blur(): void {
       input?.blur();
     },
 
