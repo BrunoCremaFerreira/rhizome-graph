@@ -111,11 +111,13 @@ rhizome_graph/repo.py       # pure: reads .git/HEAD for the branch (never shells
 rhizome_graph/paths.py      # pure: resolve a typed root, and complete a directory like a shell
 rhizome_graph/token.py      # pure: the control token — mint, compare, and inject into the page
 rhizome_graph/hexdump.py    # pure: the xxd format, byte for byte, + is-this-binary
+rhizome_graph/safe_read.py  # the ONE capped read of a path we did not construct (FIFO-safe)
 rhizome_graph/gitcmd.py     # the ONE place that forks `git` (kill + close + reap on timeout)
 rhizome_graph/diff.py       # the uncommitted diff of one file (see the note in Status)
 rhizome_graph/checkouts.py  # pure: which checkouts sit BELOW a path (the downward question)
 rhizome_graph/status.py     # pure parse of `git status --porcelain -z`, the fan-out, the frame
 rhizome_graph/file_view.py  # what a clicked file shows: diff, else text, else hex
+rhizome_graph/content_search.py # which files hold this string (forks nothing, imports no `re`)
 rhizome_graph/cli.py        # pure: argv + environ + cwd → frozen Settings; `rhi` itself
 rhizome_graph/assets.py     # pure: where THIS installation keeps web/dist, and the hook command
 rhizome_graph/ipc.py        # is that socket live? is that port free? (answers, never raises)
@@ -133,6 +135,9 @@ web/src/avatar.ts           # the agent figure, painted on a canvas
 web/src/eventLog.ts         # pure: the recent-changes list model (drops seed, folds repeats)
 web/src/attribution.ts      # pure: has any attributed event arrived? (latch, never unlatches)
 web/src/search.ts           # pure: match, the walk over matches, and the camera frame for them
+web/src/matchRanges.ts      # pure: the ASCII fold + the non-overlapping occurrences in a text
+web/src/contentSearch.ts    # pure: the ctrl+shift+F state machine (submit, adopt, walk, mark)
+web/src/contentSearchKeys.ts # pure: what ctrl+shift+F / Enter / F3 / Esc mean
 web/src/rootPrompt.ts       # pure: the ctrl+L bar's state (text, completion, discard on Esc)
 web/src/pick.ts             # pure: which file a click (or the resting pointer) landed on
 web/src/labels.ts           # pure: label size/placement, and which files are named this frame
@@ -144,11 +149,11 @@ web/src/fileDoc.ts          # pure: what the panel draws — rows, gutter, token
 web/src/highlight.ts        # the ONE place that names shiki (lazy wasm + 22 literal imports)
 web/src/readMarker.ts       # the violet ring a file wears while an agent is reading it
 web/src/statusList.ts       # pure: the uncommitted-changes panel (order, cap, is it visible)
-web/src/searchKeys.ts       # pure: what ctrl+F / F3 / Esc mean
+web/src/searchKeys.ts       # pure: what ctrl+F / F3 / Esc mean (and what a SHIFTED ctrl+F is not)
 web/src/branding.ts         # pure: APP_NAME, so the untestable renderer never spells it
 web/src/token.ts            # pure: read the control token, stamp it on a command frame
 web/src/*Hud.ts             # thin DOM painters: context caption, event list, attribution, search
-                            # box, git status panel
+                            # box, content-search box, git status panel
 setup.py / MANIFEST.in      # the ONLY dynamic build step: copy web/dist in, IF it was built
 run.sh / start.sh           # minimal launcher / full bootstrap
 ```
@@ -245,7 +250,7 @@ it should do.
 
 Web MVP implemented and verified end-to-end (TDD).
 
-- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1177/1177 pytest green (1197 with
+- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1310/1310 pytest green (1330 with
   `RHIZOME_PACKAGE_TESTS=1`, which opts into the slow builds — one wheel, one real `.deb`).
   Hook is stdlib-only and exits 0 on garbage input. Daemon seeds the project tree at boot,
   ingests hook events on a Unix socket, watches the filesystem, and serves `web/dist` over
@@ -369,7 +374,12 @@ Web MVP implemented and verified end-to-end (TDD).
 - **The observed root is no longer a boot constant.** `ctrl+L` in the page opens a bar that
   swaps it: the WebSocket, once broadcast-only, now also accepts `{"kind":"complete"}` (the
   browser cannot read the disk, so the daemon answers tab-completion) and
-  `{"kind":"setRoot"}`. `Session.switch_root` stops the watcher, calls `EventHub.reset` —
+  `{"kind":"setRoot"}`. (`COMMAND_KINDS` is four now — `file` and `search` are the others —
+  and each kind names its OWN required field: a `search` carries a `query` and parses with
+  `path: ""`, which is the echo field both gates put into their refusal, so their code is
+  literally unchanged. Every key beyond `kind`/`path`/`token` is **conditional**, present only
+  when the frame carried it in a form this daemon understands, which is what keeps five pinned
+  exact-equality assertions byte-identical.) `Session.switch_root` stops the watcher, calls `EventHub.reset` —
   which clears `known_paths`, the seed and the replay, and broadcasts a `reset` frame the
   clients wipe their graph on — re-seeds, and restarts the watcher on the new root. Two
   details are load-bearing: `reset` sits FIRST in `replay_messages()`, so a client connecting
@@ -382,7 +392,9 @@ Web MVP implemented and verified end-to-end (TDD).
   node within ~14 device px and asks the daemon for `{"kind":"file"}`. The answer is, in this
   order, the `git diff HEAD --` of that path, else its text, else an `xxd` dump — and `xxd`
   means the real format: the tests compare against the installed binary rather than trusting
-  a hand-written spec. Two defences apply because the path arrives from the network:
+  a hand-written spec. The order has exactly one opt-out, `prefer: "text"` on the same command,
+  and only the content search asks for it — see its bullet below for why a diff is the wrong
+  answer to "show me the line that matched". Two defences apply because the path arrives from the network:
   `resolve_inside` refuses anything resolving outside the observed root (symlinks included),
   and the content is capped at 256 KiB, flagged `truncated`, because it crosses the WebSocket
   whole. **Caveat, unfixed:** that cap is on the text/hex path only — `mode: "diff"` returns
@@ -575,7 +587,7 @@ Web MVP implemented and verified end-to-end (TDD).
   tolerated rather than fatal (the `python` stub in the older `start.sh` tests answers every
   call with silence, and prod does not need the variable at all) — it warns on stderr in
   `--dev`, where the cost is that every command is refused.
-- **Frontend** (`web/`): 990/990 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
+- **Frontend** (`web/`): 1287/1287 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
   3.23.0 — 4.x needs Node ≥ 20 and this machine has 18) is the first runtime dependency added
   since `d3-force`; note that `npm install` under npm 10 strips the `libc` fields from
   `package-lock.json`, so check `git diff` on the lock after touching dependencies. Gource-style WebGL
@@ -641,7 +653,10 @@ Web MVP implemented and verified end-to-end (TDD).
   tree needs `refreshMatches`, not `setQuery`, to fold new events into an open search —
   `setQuery` restarts the walk by contract, which would throw an `F3` walk back to the
   overview every time a file was written. Touching the wheel disarms the camera without
-  dropping the highlights; the next query or `F3` rearms it.
+  dropping the highlights; the next query or `F3` rearms it. `interpretSearchKey` answers
+  **`null` for a shifted `ctrl+F`** and `SearchKeyEvent.shiftKey` is **optional**: the chord
+  belongs to the content search below, and a required field would have turned a one-line semantic
+  change into a compile error across a pinned test file.
 - **Enter opens the file the walk is resting on.** The walk put the camera on a file and
   stopped there, so seeing what was *inside* the file just found meant abandoning the
   keyboard to aim at a dot in a force layout that never stops moving. `Enter` now goes
@@ -658,6 +673,96 @@ Web MVP implemented and verified end-to-end (TDD).
   box stays open behind the panel and only the *focus* moves (`SearchHud.blur`, not `close`):
   the highlights are still wanted, and `F3` keeps stepping because the listener is on
   `window`, not on the field.
+- **Content search (`ctrl+shift+F`) reads what is inside the files.** `ctrl+F` answers "where is
+  `renderer.ts`?"; this one answers "who calls `resolve_inside`?", which the page could not ask at
+  all, because the browser cannot read the disk. The bar is submitted with `Enter`, the daemon
+  greps, the matching nodes light up through the very same renderer channel `ctrl+F` uses, and
+  `F3` walks **occurrence by occurrence, across files** — each step that crosses into another file
+  moves the camera to its node and opens that file in the panel **docked to the right**, matches
+  tinted, the active one stronger, scrolled to its row. The staged plan it was built from is
+  `docs/features/todo/content-search.md`. Eleven things are load-bearing:
+  - **The fold is ASCII-only, and that is a correctness rule, not a shortcut.** `str.lower()` on
+    the Latin capital I with a dot above (U+0130) yields **two** characters, in Python and in
+    JavaScript alike, so a Unicode fold changes the length of the text and invalidates every
+    offset computed against it. Folding only `A-Z` also makes the byte-level pass and the
+    character-level pass **the same rule** rather than a heuristic plus a check, since an ASCII
+    byte never occurs inside a UTF-8 continuation. Stated price: a word spelled with an accented
+    capital does not match the same word spelled with an accented lowercase.
+  - **Two implementations of that rule, one fixture table.** `content_search.py` and
+    `matchRanges.ts` share no code — there is no code path between the two languages — so they
+    share a table of `(text, query, ranges)` triples asserted in both suites in the same order,
+    every character inside the BMP on purpose (outside it, UTF-16 indices and code-point indices
+    would disagree about the same match). Same precedent as pinning `xxd` against the installed
+    binary rather than against a written spec.
+  - **The grep forks nothing and imports no `re`**, both asserted over the parsed source the way
+    `checkouts.py`'s "starts no process" is. `git grep` was the obvious answer and is wrong three
+    times over: it misses untracked files, it has nothing to say about a root that is not a
+    repository, and it cannot answer for a workspace of checkouts. The `re` half is what makes
+    "no regex from the network" structural rather than a promise in a docstring.
+  - **`MAX_FILE_BYTES` IS `file_view.DEFAULT_MAX_BYTES`, imported, never a second literal of the
+    same value.** The panel shows the first 256 KiB and the search counts over the first 256 KiB,
+    so the browser's own recount of the panel's text equals the daemon's count. Two constants that
+    happen to be equal is the bug waiting to happen. The cap that actually binds is the new
+    `MAX_TOTAL_BYTES` (64 MiB) — 20 000 files at 256 KiB is 5 GiB — with `MAX_MATCH_FILES` 500 and
+    `MAX_TOTAL_MATCHES` 5000 beside it. About 3 s worst case, all of it inside `asyncio.to_thread`,
+    for the same reason `scan_tree` runs there.
+  - **Two passes, because the numbers say so.** Byte matching runs at 514 MB/s and decoding at
+    98 MB/s on this host, so the byte pass runs over everything and the decoded pass only over the
+    files that hit. The decoded pass is the **authority**: on malformed UTF-8 the two can disagree,
+    and the decoded one is the text the panel will actually receive.
+  - **`safe_read.py` exists because `scan_tree` filters symlinks but not FIFOs** — `os.path.islink`
+    is false for a named pipe. A search opening thousands of files with a bare `open()` parks a
+    worker thread on a writerless pipe permanently: the executor is shared with `scan_tree` and
+    `file_view`, workers cannot be cancelled, and shutdown joins them, so the daemon eventually
+    cannot even exit. The defence already existed inside `file_view`; it was private, and a
+    chokepoint reachable from one caller and duplicated for the other is not a chokepoint.
+  - **`Enter` submits; the search is not live per keystroke.** The name search recomputes from an
+    in-memory node list, this one reads the disk, and a round trip per keystroke means a debounce,
+    a supersede rule and an in-flight cancellation — three mechanisms to get right, to save one key
+    press. **There is no debounce anywhere in this feature.** What survives of the race is one
+    rule: an answer about an abandoned root is still **answered**, with an empty frame and a
+    reason, unlike `publish_status`, which drops it. A dropped reply strands the browser's
+    `pending` flag with no second reply coming.
+  - **The result frame carries `[{path, count}]` and nothing else** — no lines, no columns, no
+    preview. The browser recomputes the ranges from the text the existing `{"kind":"file"}` round
+    trip already gives it, which removes the byte-offset-versus-UTF-16 problem and the second
+    definition of "where the matches are". The cost is a window where the file changed between the
+    grep and the click: the walk **clamps** to the last range actually found while the counter
+    keeps the daemon's numbers. A stated degradation, not a silent one.
+  - **The panel had to be able to answer with TEXT, and that is the sharpest conflict in the
+    feature.** `file_view` returns the diff of a dirty file, and `git diff` prints hunks with three
+    lines of context, so most matched lines are not in the diff at all — a step onto line 220 of a
+    400-line file would open a document that does not contain it, under a counter reading
+    `7 / 213`. Hence `prefer: "text"` on the **existing** `file` command rather than a new command
+    kind: a second read route would be a second place a path from the network becomes an open
+    descriptor. Only the exact string has an effect (absent, `"diff"`, junk all mean today's
+    diff-first chain, so the worst case is a diff where text was wanted), and the branch sits
+    **before** the fork, so asking for text costs no `git` at all. Under it a deleted file reaches
+    `no such file` rather than its removal diff, and that is correct — the search never matched a
+    file that is not on disk. The status-panel click keeps the default and keeps its removal diff.
+  - **The marks are an ARGUMENT to `buildDoc`, never state.** The query and the active occurrence
+    belong to the search; copied onto `FileViewState` they would have two owners and a
+    synchronisation bug the first time an answer landed late. `DocMarking` is therefore declared in
+    `fileDoc.ts`, so the search imports the panel and never the reverse, and `buildDoc(state)` with
+    one argument is byte for byte what it always was. The splitter cuts at the **union** of token
+    boundaries and match boundaries, slicing out of `row.text` rather than out of the tokens, and
+    its invariant is the new axis of the one `fileDoc` already lives by:
+    `spans.map(s => s.text).join("") === row.text`. `MAX_MARKS_PER_DOC` is 2000, past which only
+    the active row is split — a one-letter query over a 4 000-line file is ~40 000 spans in a panel
+    rebuilt every paint, sharing a frame budget with a force layout that never settles.
+  - **Walking OPENS the file here, inverting `searchKeys.ts`'s own stated rule, on purpose.** That
+    rule exists because a modal over the graph on every `F3` step buries the thing being stepped
+    through — and the docked placement is precisely that condition being removed. Both halves had
+    to ship together: a content `F3` that opened the *modal* would reproduce the exact failure the
+    old rule prevents. Two smaller rules hold the rest up. **Only one search is armed at a time**
+    (opening either closes the other), which is what lets `renderer.setSearch` stay a single
+    channel with no mode and lets each binding keep answering `null` while its own box is closed.
+    And **`pointer-events: none` on the docked container is the load-bearing CSS line**: without it
+    the full-window flex box keeps eating clicks meant for file dots and the graph is as dead as it
+    is under the modal, with nothing on screen to explain why. The canvas is deliberately **not**
+    resized — `frameMatches` gained an `occludedRight` fraction instead, clamped below 0.9 and
+    applied *after* the `MIN`/`MAX` clamp, and the renderer passes a **measurement** of the panel
+    rather than a copy of its `40vw`.
 - **Text is not part of the glow.** Labels live in a separate `overlayScene`, drawn after
   the composer with `autoClear = false`. Every glyph pixel clears the bloom's 0.05
   threshold, so a label left in the main scene gets an additive halo that closes the
@@ -789,6 +894,31 @@ whether sixteen repositories' worth of rows is a panel or a wall, and whether th
 `MAX_SCANNED_DIRS` remains a pinned guess rather than an observed ceiling. And no real workspace
 has been polled long enough to see a round approach the 20 s worst case, which is arithmetic
 from the constants, not an observation.
+
+**Not yet verified, for the content search.** Both suites are green and every pure decision is
+pinned, but `main.ts` is the composition root and carries no test by doctrine, so the feature has
+been exercised only through its parts. Nothing below has been seen in a browser, because this host
+has none. Whether the docked panel at `40vw` leaves the stepped match inside the visible band --
+`frameMatches`'s shifted centre is arithmetic nobody has watched — at a framed-whole tree and at
+close zoom alike. Whether the two mark shades are distinguishable at a glance and stay legible
+under Dark+ tokens, and, on the modal route (a graph click on a file that is also a match keeps
+its diff and is still marked), over the diff's own translucent stripes. Whether the new bar reads
+as a different box from the name search, sitting in the same slot with the same skin and a small
+`in files` label to tell them apart. Whether `occludedFraction()` measures what it is meant to in
+a real browser, and whether the camera stays sane across a resize with the panel docked. Escape
+twice with a docked panel (panel first, then bar), `F3` stepping while it is open, and `ctrl+F` /
+`ctrl+shift+F` swapping the two bars without leaving stale highlights on the graph. And no real
+workspace has been searched at the caps: the ~3 s worst case is arithmetic from throughputs
+measured on this host's small trees, not an observation, and `MAX_MARKS_PER_DOC` is a pinned guess
+rather than an observed frame budget.
+
+Three findings from that plan are **noted and not built**, each with its trigger written down in
+`docs/features/todo/content-search.md`: R11, that every command refusal is reported as a
+`rootError` and painted in the observed-root bar — pre-existing, and a refused `search` is now a
+fourth silent case of it; R12, that results are not re-grepped as the tree changes under them (the
+name search has `refreshMatches` for exactly this, and a content search cannot re-read the disk on
+every event); and R14, that one client's search blocks that client's other commands for its
+duration.
 
 Not yet built: per-repository grouping in the panel (R5 in
 `docs/features/todo/multi-repo-git-status.md` — the `repo` field exists on `StatusEntry` and is
