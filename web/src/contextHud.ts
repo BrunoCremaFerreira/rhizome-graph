@@ -2,27 +2,21 @@
  * The bottom-centre caption: which directory is on screen, and on what branch.
  *
  * Presentation only — no domain logic. It takes an already-parsed
- * {@link DaemonMeta} and writes text into two spans. The only decision it makes
- * is how many characters fit, and even that is delegated to `truncateMiddle`
- * (pure, and tested), because clipping the tail with CSS would hide exactly the
- * segment that identifies the project.
+ * {@link DaemonMeta} and writes text into two spans. How many characters fit is
+ * `bottomRow.ts`'s answer and the truncation is `truncateMiddle`'s, both pure
+ * and both tested: the budget shares the bottom row out between three boxes, so
+ * it is the last thing that should have lived in an untested painter. Clipping
+ * with CSS is not an option either — it would hide exactly the tail segment
+ * that identifies the project.
  *
  * DOM-bound, so it is not unit-tested; keep it that thin.
  */
 
+import { contextCharBudget } from "./bottomRow";
 import { truncateMiddle, type DaemonMeta } from "./protocol";
-
-/** Rough width of one 12px system-ui character, in px. Sizing only. */
-const CHAR_PX = 6.6;
-
-/** The caption is capped at 50vw by CSS; mirror that when budgeting chars. */
-const WIDTH_FRACTION = 0.5;
 
 /** Branch names get their own slice so a long path cannot eat them. */
 const MAX_BRANCH_CHARS = 24;
-
-/** Never shrink the path below this, even on an absurdly narrow viewport. */
-const MIN_ROOT_CHARS = 12;
 
 export interface ContextHud {
   /** Show a meta frame the daemon just sent. */
@@ -48,10 +42,8 @@ export function createContextHud(container: HTMLElement): ContextHud {
 
     const branch = meta.branch ? truncateMiddle(meta.branch, MAX_BRANCH_CHARS) : "";
     const viewport = typeof window !== "undefined" ? window.innerWidth : 0;
-    const total = Math.floor((viewport * WIDTH_FRACTION) / CHAR_PX);
-    const budget = Math.max(MIN_ROOT_CHARS, total - branch.length - 3);
 
-    rootEl.textContent = truncateMiddle(meta.root, budget);
+    rootEl.textContent = truncateMiddle(meta.root, contextCharBudget(viewport, branch.length));
     branchEl.textContent = branch;
     // Hiding the span hides its `::before` separator too: no orphan " · ".
     branchEl.hidden = branch.length === 0;

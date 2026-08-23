@@ -13,14 +13,42 @@ body {
 }
 
 /*
+ * The bottom row: #hud on the left, #context centred, #status on the right.
+ * They used to be three independently fixed boxes, which is how the shortcut
+ * legend came to be painted over the observed root at every viewport — nothing
+ * in the document related their widths, so each grew until it reached its
+ * neighbours. One grid owns the row instead: `minmax(0, 1fr)` on the sides lets
+ * a track shrink below its content (the default `min-content` floor would push
+ * the row wider than the viewport), `auto` in the middle keeps the centre box
+ * at its own width, and `align-items: end` keeps all three sitting on the same
+ * baseline as before.
+ *
+ * `pointer-events: none` here is load-bearing, exactly as it is on the docked
+ * file panel: the bar spans the whole viewport width, and without it the empty
+ * parts of the row would swallow every drag and click meant for the canvas
+ * underneath. #log and #status take hit-testing back for themselves.
+ */
+#bottom-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 10px;
+  padding: 0 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  pointer-events: none;
+}
+
+/*
  * Bottom-left column: recent activity above, title + shortcuts below, both
  * anchored to the bottom edge. One element, not two floating blocks — a
  * separate list would have to guess this one's height to sit above it.
+ * `justify-self: start` because a grid item stretches its track by default, and
+ * a stretched box here would cover a third of the viewport.
  */
 #hud {
-  position: fixed;
-  left: 12px;
-  bottom: 10px;
+  justify-self: start;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
@@ -48,9 +76,22 @@ body {
   margin: 0 0 8px;
   padding: 0;
   max-height: 30vh;
-  max-width: 40vw;
   overflow-y: auto;
   overflow-x: hidden;
+  /*
+   * A row is a path and `nowrap`, so a single entry makes this list's
+   * min-content a whole line; #hud is shrink-to-fit around it and overflows
+   * its grid track toward #context (measured: 448px in a 412px track at
+   * 1280). A grid item floors at min-content, so only a bound on the used
+   * width clamps it, and that bound must sit here rather than on #hud: #hud
+   * clips nothing, so a clamped #hud would still be painted over by a
+   * full-width row. The `overflow-x: hidden` above absorbs the cut. A `vw`
+   * cap is dead only ABOVE the viewport width where it crosses the content's
+   * natural size; this one binds at every width once the list is non-empty,
+   * since a path grows without limit. 40vw does not: 512px at 1280 is wider
+   * than the 448px the box already wants.
+   */
+  max-width: 32vw;
   pointer-events: auto;
   scrollbar-width: none;
   -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
@@ -114,7 +155,6 @@ body {
  */
 #attribution {
   margin: 0 0 8px;
-  max-width: 40vw;
   color: #5c6067;
 }
 
@@ -124,11 +164,7 @@ body {
  * painted on top of it would swallow a drag that started here.
  */
 #context {
-  position: fixed;
-  bottom: 10px;
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: 50vw;
+  justify-self: center;
   color: #8a8f98;
   font: 12px/1.4 system-ui, sans-serif;
   white-space: nowrap;
@@ -341,24 +377,40 @@ body {
 }
 
 /*
- * Uncommitted changes, bottom RIGHT — the one corner still free: #hud owns the
- * left (40vw), #context the centre (50vw), so 32vw here cannot reach either.
- * `pointer-events: auto` is required rather than cosmetic: the rows are clicked
- * to open a file and the list is scrolled. Same greys and typography as #hud,
- * and the scrollbar is hidden — but the mask is NOT #log's. There the fade is
- * proportional (60%) because what dims is old history nobody will click. Here
- * every row is a click target, and a proportional mask is relative to the
- * element's own box, so even a two-line list would show its last line half
- * erased, permanently. Only the last 24px fade: enough to signal "there is more
- * below" while scrolling, and no fade at all worth noticing on a short list.
+ * Uncommitted changes, the right-hand track of #bottom-bar. It is NOT free of
+ * its neighbours by being in a corner — that is what the previous version of
+ * this comment claimed, and the claim was wrong twice over: a *centred* box
+ * costs each neighbour half its width, and #hud never carried the 40vw cap
+ * credited to it (that `max-width` sat on #log and #attribution, never on the
+ * 708px shortcut legend). What keeps this box clear of the other two is the
+ * grid track it sits in and the `max-width` below, plus the character budget
+ * in `bottomRow.ts` for the one collision a track cannot close: #context is
+ * `nowrap`, so its min-content is the whole caption and it would overflow into
+ * this track rather than shrink. `justify-self: end` keeps the box
+ * shrink-to-fit — stretched, its `pointer-events: auto` would swallow every
+ * click across a third of the viewport. That `auto` is required rather than
+ * cosmetic: the rows are clicked to open a file and the list is scrolled. Same
+ * greys and typography as #hud, and the scrollbar is hidden — but the mask is
+ * NOT #log's. There the fade is proportional (60%) because what dims is old
+ * history nobody will click. Here every row is a click target, and a
+ * proportional mask is relative to the element's own box, so even a two-line
+ * list would show its last line half erased, permanently. Only the last 24px
+ * fade: enough to signal "there is more below" while scrolling, and no fade at
+ * all worth noticing on a short list.
  */
 #status {
-  position: fixed;
-  right: 12px;
-  bottom: 10px;
+  justify-self: end;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  /*
+   * The track alone does not hold this panel off #context: its rows are paths
+   * and `nowrap`, so its min-content is 231px and it keeps that inside a
+   * 225px track at a 600px viewport, overlapping #context by 6px. A `vw` cap
+   * is dead only ABOVE the viewport width where it crosses the content's
+   * natural size, which here is 231 / 0.32 = ~722px; measured any wider, this
+   * cap does nothing, which is why it has twice been swept out as dead.
+   */
   max-width: 32vw;
   max-height: 40vh;
   overflow-y: auto;

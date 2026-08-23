@@ -7,19 +7,34 @@
   </head>
   <body>
     <canvas id="stage"></canvas>
-    <div id="hud">
-      <ol id="log"></ol>
-      <div id="attribution" hidden></div>
-      <div class="about">
-        rhizome-graph · Gource-style live view
-        <span class="keys">
-          scroll: zoom · drag: pan · double-click: auto-fit · click: open file · ctrl+F: search ·
-          ctrl+shift+F: search in files · F3: next · ctrl+L: root
-        </span>
+    <!--
+      The bottom row, laid out as ONE grid rather than as three boxes each
+      pinned to the page: left caption, centred observed root, right git
+      status. Positioned independently they overlapped at every realistic
+      viewport -- the shortcut legend ran under the root path by 276px at
+      1600 and buried it whole at 960 -- because nothing related their
+      widths. Here each box owns a track, so growing content wraps inside
+      its own cell instead of reaching into a neighbour's.
+    -->
+    <div id="bottom-bar">
+      <div id="hud">
+        <ol id="log"></ol>
+        <div id="attribution" hidden></div>
+        <div class="about">
+          rhizome-graph · Gource-style live view
+          <span class="keys">
+            scroll: zoom · drag: pan · double-click: auto-fit · click: open file · ctrl+F: search ·
+            ctrl+shift+F: search in files · F3: next · ctrl+L: root
+          </span>
+        </div>
       </div>
-    </div>
-    <div id="context">
-      <span id="context-root"></span><span id="context-branch" hidden></span>
+      <div id="context">
+        <span id="context-root"></span><span id="context-branch" hidden></span>
+      </div>
+      <div id="status" hidden>
+        <div class="head"><span class="title">git status</span><span id="status-count"></span></div>
+        <ol id="status-list"></ol>
+      </div>
     </div>
     <div id="search" hidden>
       <input
@@ -60,10 +75,6 @@
       </div>
       <div id="root-matches" hidden></div>
       <div id="root-error" hidden></div>
-    </div>
-    <div id="status" hidden>
-      <div class="head"><span class="title">git status</span><span id="status-count"></span></div>
-      <ol id="status-list"></ol>
     </div>
     <div id="file-view" hidden>
       <div id="file-view-backdrop"></div>
