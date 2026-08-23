@@ -341,6 +341,12 @@ export class GourceRenderer {
    * frame can mark which dot the text on screen belongs to.
    */
   private openFilePath: string | null = null;
+  /**
+   * Fraction of the canvas width hidden behind a panel on the right, `0` when
+   * nothing is. Measured and pushed in by the panel's owner; see
+   * {@link setOccludedRight}.
+   */
+  private occludedRight = 0;
   /** The active match's ring, in the MAIN scene: unlike text, it should glow. */
   private readonly searchMarker: Sprite;
   /** Scratch for the camera frame; refilled in place, never reallocated. */
@@ -626,6 +632,19 @@ export class GourceRenderer {
    */
   setOpenFile(path: string | null): void {
     this.openFilePath = path;
+  }
+
+  /**
+   * How much of the viewport's width is covered on the right by a panel.
+   *
+   * A MEASUREMENT, taken by whoever owns that panel and handed here as a
+   * fraction of the canvas width — never the stylesheet's own `40vw`, which
+   * would be a second copy of a number the CSS may change. All this renderer
+   * does with it is hand it to `frameMatches`, which is where the arithmetic of
+   * an off-centre viewport lives; nothing in here learns what the panel is for.
+   */
+  setOccludedRight(fraction: number): void {
+    this.occludedRight = fraction;
   }
 
   /** Register a discrete event for its visual effect (actor beam + flash). */
@@ -1036,7 +1055,10 @@ export class GourceRenderer {
     }
     points.length = count;
 
-    const target = frameMatches(points, this.aspect());
+    // The third argument is what keeps a match out from under a docked panel:
+    // with 40% of the width covered, the centre of the VISIBLE band is not the
+    // centre of the viewport.
+    const target = frameMatches(points, this.aspect(), this.occludedRight);
     // Matches with no position yet (the layout has not placed them): leave the
     // camera alone this frame rather than jumping it to the origin.
     if (!target) return false;

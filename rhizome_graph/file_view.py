@@ -17,6 +17,24 @@ which is all git has to say about it) rather than as a hex dump of the new bytes
 the question the viewer clicked to ask was "what did the agent just do to this
 file".
 
+Step 3 has an opt-out, and only one caller uses it. ``allow_diff=False`` skips
+the diff entirely -- the chain becomes refused -> directory -> not on disk ->
+text -> hex -- because the content search asks a different question. A match is
+at a *line of the file on disk*, while ``git diff`` prints hunks with three
+lines of context, so a file with one small edit shows perhaps ten of its four
+hundred lines and a match at line 220 is simply not in the answer. Opening that
+diff under a counter reading ``7 / 213`` would show none of the 7, and it would
+do so on exactly the files an agent has just touched, which are the files anyone
+is searching for. The status-panel click keeps the default and keeps its diff.
+
+The branch sits **before** the fork, not around its result: a walk opens a file
+per keystroke, and ~20 ms of ``git`` per step that is then discarded is the
+difference between a responsive walk and a stuttering one.
+
+Under the opt-out a **deleted** file reaches "no such file" one step earlier,
+and that is correct rather than unfortunate: nothing is on disk for a content
+search to have matched, so it never asks about such a path.
+
 And existence is asked about *after* git, not before. A **deleted** file -- the
 single entry the status panel most wants to offer for a click -- is not on disk
 by definition, and the old order answered "no such file" while ``git diff HEAD``
@@ -66,23 +84,35 @@ apart on purpose -- a binary has no lines, and the read must not become
 line-aware.
 
 The read itself goes to a thread. Blocking the loop freezes every connected
-viewer, for the same reason :func:`rhizome_graph.tree.scan_tree` is off it -- and
-that is exactly why only a regular file may be opened at all
-(:func:`is_readable_regular`): a thread parked in ``open(2)`` on a named pipe is
-lost for good. Nothing here raises.
+viewer, for the same reason :func:`rhizome_graph.tree.scan_tree` is off it. The
+open is not written here: a clicked path is a path this module did not
+construct, so it goes through :mod:`rhizome_graph.safe_read`, whose docstring
+carries the reason a thread parked in ``open(2)`` on a named pipe is lost for
+good. :func:`is_readable_regular` and :func:`read_capped` are re-exported from
+there, because that is where callers of this module have always found them.
+Nothing here raises.
 """
 
 from __future__ import annotations
 
 import asyncio
-import errno
-import fcntl
 import os
-import stat
 
 from rhizome_graph.checkouts import owning_checkout
 from rhizome_graph.diff import git_diff
 from rhizome_graph.hexdump import looks_binary, xxd_dump
+from rhizome_graph.safe_read import is_readable_regular, read_capped
+
+#: Re-exported so that a caller who has always found the FIFO-safe read here
+#: keeps finding it, now that it lives in its own module.
+__all__ = [
+    "DEFAULT_MAX_BYTES",
+    "cap_text",
+    "file_view",
+    "is_readable_regular",
+    "read_capped",
+    "resolve_inside",
+]
 
 #: Ceiling on the bytes read for one panel.
 DEFAULT_MAX_BYTES = 256 * 1024
@@ -116,6 +146,7 @@ async def file_view(
     root: str,
     relative_path: str,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    allow_diff: bool = True,
 ) -> dict:
     """The ``fileView`` frame for `relative_path`, ready to be sent as JSON.
 
@@ -123,6 +154,12 @@ async def file_view(
     would raise inside the send, on the daemon's loop. ``path`` is echoed intact
     because the page keys the panel by it -- a second click while the first answer
     is still travelling must not paint the wrong file's content.
+
+    `allow_diff` is the content search's opt-out from step 3 of the chain (see
+    the module docstring). It is read strictly *after* :func:`resolve_inside`
+    and changes no path handling at all, and it gates the fork itself rather
+    than its result: asking for text must not run ``git`` and throw the answer
+    away.
     """
     target = resolve_inside(root, relative_path)
     if target is None:
@@ -130,21 +167,24 @@ async def file_view(
     if os.path.isdir(target):
         return _frame(relative_path, error="that is a directory")
 
-    cwd, diff_path = _diff_location(root, relative_path, target)
-    diff = await git_diff(cwd, diff_path)
-    if diff is not None:
-        content, truncated = cap_text(diff, max_bytes)
-        return _frame(
-            relative_path, mode="diff", content=content, truncated=truncated
-        )
+    if allow_diff:
+        cwd, diff_path = _diff_location(root, relative_path, target)
+        diff = await git_diff(cwd, diff_path)
+        if diff is not None:
+            content, truncated = cap_text(diff, max_bytes)
+            return _frame(
+                relative_path, mode="diff", content=content, truncated=truncated
+            )
 
     if not os.path.exists(target):
         # Reached only once git has said it knows nothing about the path either,
-        # so a deletion opens its diff instead of an error.
+        # so a deletion opens its diff instead of an error -- unless the caller
+        # opted out of the diff, which is a caller that only wants what is on
+        # disk.
         return _frame(relative_path, error="no such file")
 
     try:
-        data, truncated = await asyncio.to_thread(_read_capped, target, max_bytes)
+        data, truncated = await asyncio.to_thread(read_capped, target, max_bytes)
     except Exception:
         return _frame(relative_path, error="unreadable")
 
@@ -182,58 +222,6 @@ def _diff_location(
     if checkout is None or checkout == os.path.realpath(root):
         return root, relative_path
     return checkout, os.path.relpath(target, checkout)
-
-
-def is_readable_regular(st_mode: int) -> bool:
-    """May a file of this type be opened for the panel?
-
-    Only a regular file. A named pipe is the one that matters: ``open(2)`` on a
-    FIFO with no writer blocks forever, and since the read runs in a worker
-    thread -- which cannot be cancelled -- one click on a build system's pipe
-    costs the daemon a worker permanently, eight clicks take the whole file
-    layer (and ``switch_root``, which shares the executor) down, and the process
-    can no longer even exit, because shutdown joins those threads. Sockets and
-    devices are refused by the same rule: the errno that happens to refuse a
-    socket today is not a rule.
-
-    The mode must come from a **followed** stat -- ``os.stat`` or ``fstat``,
-    never ``lstat`` -- so what is judged is the type at the end of a symlink.
-    ``S_IFLNK`` therefore answers ``False``: it should never arrive here, and if
-    it does the caller is asking about the link rather than about the file.
-
-    This answers "what kind of file is it", not "may this process read it": the
-    permission bits are ignored, because permission is not knowable from the
-    mode alone (root reads a ``0o000`` file) and a refusal is already reported
-    through the ``unreadable`` path.
-    """
-    return stat.S_ISREG(st_mode)
-
-
-def _read_capped(target: str, max_bytes: int) -> tuple[bytes, bool]:
-    """The first `max_bytes` of `target`, and whether there was more.
-
-    One byte past the cap is read so "exactly at the cap" is not reported as
-    truncated, and nothing beyond that ever enters the daemon's memory.
-
-    The descriptor is opened first and its type asked of the descriptor itself,
-    rather than stat'ing the path and then opening it: the two calls name the
-    same path but not necessarily the same file, and the whole point is to never
-    be holding a FIFO. ``O_NONBLOCK`` is what makes the open survivable -- it is
-    what stops ``open(2)`` from blocking on a writerless pipe -- and it is
-    cleared again before a byte is read, so a regular file keeps ordinary
-    blocking read semantics and never returns a short read with ``EAGAIN``.
-    """
-    descriptor = os.open(target, os.O_RDONLY | os.O_NONBLOCK)
-    try:
-        if not is_readable_regular(os.fstat(descriptor).st_mode):
-            raise OSError(errno.EINVAL, "not a regular file", target)
-        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
-        fcntl.fcntl(descriptor, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
-        with open(descriptor, "rb", closefd=False) as handle:
-            data = handle.read(max_bytes + 1)
-    finally:
-        os.close(descriptor)
-    return data[:max_bytes], len(data) > max_bytes
 
 
 def cap_text(text: str, max_bytes: int) -> tuple[str, bool]:

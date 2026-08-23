@@ -35,9 +35,29 @@ import {
   closeView,
   createFileView,
   requestView,
+  type FileViewPlacement,
   type FileViewState,
 } from "./fileView";
 import { buildDoc } from "./fileDoc";
+import { createContentSearchHud } from "./contentSearchHud";
+import { interpretContentSearchKey } from "./contentSearchKeys";
+import {
+  activeOccurrence,
+  applyContentResults,
+  closeContentSearch,
+  createContentSearch,
+  docMarkingFor,
+  isDirty,
+  matchedPaths,
+  nextOccurrence,
+  openContentSearch,
+  requiresLoad,
+  searchFrameOf,
+  setContentQuery,
+  submitContentSearch,
+  totalMatches,
+  type ContentSearchState,
+} from "./contentSearch";
 import {
   activePath,
   closeSearch,
@@ -61,13 +81,25 @@ function boot(): void {
    *
    * The browser cannot read the disk, so this is a round trip; the answer comes
    * back through `onFileView`. The panel opens now, in `loading`, or the click
-   * reads as one that missed and gets repeated. Shared by the two ways in — a
-   * dot in the graph and a row in the git status panel — so a status row opens
-   * exactly what clicking the same file in the graph opens.
+   * reads as one that missed and gets repeated. Shared by every way in — a dot
+   * in the graph, a row in the git status panel, Enter on the name search's
+   * walk and a step of the content search's — so all of them open exactly what
+   * clicking the same file in the graph opens.
+   *
+   * Both extra parameters are defaulted to what every older caller already
+   * does, and both are supplied by ONE caller, the content search's walk: it
+   * wants the panel beside the graph rather than over it, and it wants the
+   * file's TEXT, because a diff of a dirty file may not contain the line that
+   * matched (R4). `prefer: "diff"` is what the daemon does by default, so the
+   * key is sent unconditionally rather than branched on here.
    */
-  function openFile(path: string): void {
-    client.send({ kind: "file", path });
-    showFileView(requestView(fileView, path));
+  function openFile(
+    path: string,
+    placement: FileViewPlacement = "modal",
+    prefer: "diff" | "text" = "diff",
+  ): void {
+    client.send({ kind: "file", path, prefer });
+    showFileView(requestView(fileView, path, placement));
   }
 
   const renderer = createRenderer(canvas, sim, {
@@ -84,6 +116,8 @@ function boot(): void {
   const attribution = createAttributionMonitor();
   const searchEl = document.getElementById("search");
   const searchHud = searchEl ? createSearchHud(searchEl) : null;
+  const contentSearchEl = document.getElementById("content-search");
+  const contentSearchHud = contentSearchEl ? createContentSearchHud(contentSearchEl) : null;
   const rootEl = document.getElementById("root-bar");
   const rootHud = rootEl ? createRootHud(rootEl) : null;
   const fileViewEl = document.getElementById("file-view");
@@ -104,6 +138,36 @@ function boot(): void {
     }
     searchHud?.setStatus(search.matches.length, search.activeIndex);
     renderer.setSearch(search.matches, activePath(search), search.frame);
+  }
+
+  // And once more for the content search. Everything it decides — what the
+  // counter says, which paths light up, whether the camera frames them all or
+  // approaches one — is `contentSearch.ts`'s; this is the variable and the
+  // paint. Note it drives the SAME renderer channel as the name search: only
+  // one of the two is ever open, so there is nothing here for the renderer to
+  // learn about content searching.
+  let contentSearch: ContentSearchState = createContentSearch();
+
+  function showContentSearch(next: ContentSearchState): void {
+    contentSearch = next;
+    if (!contentSearch.open) {
+      contentSearchHud?.close();
+      renderer.clearSearch();
+      return;
+    }
+    contentSearchHud?.setStatus({
+      pending: contentSearch.pending,
+      submitted: contentSearch.submitted,
+      total: totalMatches(contentSearch),
+      occurrence: contentSearch.occurrence,
+      truncated: contentSearch.truncated,
+      error: contentSearch.error,
+    });
+    renderer.setSearch(
+      matchedPaths(contentSearch),
+      activeOccurrence(contentSearch)?.path ?? null,
+      searchFrameOf(contentSearch),
+    );
   }
 
   // Same shape for the root bar: the state machine is `rootPrompt.ts`, this is
@@ -147,12 +211,22 @@ function boot(): void {
       // The dot in the graph stops being the one on screen at the same moment
       // the panel does.
       renderer.setOpenFile(null);
+      // Nothing covers the graph any more, so the camera frames matches on the
+      // whole viewport again.
+      renderer.setOccludedRight(fileViewHud?.occludedFraction() ?? 0);
       return;
     }
-    const doc = buildDoc(fileView);
+    // The marks are the SEARCH's, not the panel's: `docMarkingFor` answers null
+    // for every path the content search did not match, which is every path the
+    // modal route ever opens, and the panel then behaves exactly as it did.
+    const doc = buildDoc(fileView, docMarkingFor(contentSearch, fileView.path) ?? undefined);
     fileViewHud?.open();
     fileViewHud?.render(fileView, doc, keepScroll);
     renderer.setOpenFile(fileView.path);
+    // Measured after the paint, because the panel has just been shown and its
+    // placement class set; a docked panel hides part of the graph, and the
+    // camera has to aim at what is left of it.
+    renderer.setOccludedRight(fileViewHud?.occludedFraction() ?? 0);
 
     // Already coloured, or nothing to colour. The first half is what stops the
     // repaint below from asking again — and again.
@@ -203,6 +277,11 @@ function boot(): void {
       // still the one being waited for -- the user may have clicked elsewhere,
       // or closed the panel, while it travelled -- so nothing here inspects it.
       onFileView: (view) => showFileView(applyView(fileView, view)),
+      // The daemon answered a content search. `applyContentResults` decides
+      // whether this answer is still the one being waited for — the bar may
+      // have been closed, or the query typed over and resubmitted, while it
+      // travelled — so nothing here inspects it.
+      onSearchResult: (result) => showContentSearch(applyContentResults(contentSearch, result)),
       // What is uncommitted right now. The frame is deduped by the daemon, so
       // this only fires when the working tree really changed.
       onStatus: (status) => statusHud?.render(status),
@@ -218,6 +297,11 @@ function boot(): void {
         // The open file was a file of the old project: its contents are now
         // about a path nobody is looking at.
         showFileView(closeView(fileView));
+        // The results name files of the old project: their highlights would
+        // point at nodes the new tree does not have. Closing also settles the
+        // request that may still be in flight — the state it lands on is no
+        // longer pending, so `applyContentResults` refuses it.
+        showContentSearch(closeContentSearch(contentSearch));
         attribution.reset();
         attributionHud?.update(false, false);
         // Only now does the bar close: the switch is confirmed, not merely sent.
@@ -229,6 +313,11 @@ function boot(): void {
   // The button and Escape below share one close path; two would drift apart.
   fileViewHud?.onClose(() => showFileView(closeView(fileView)));
   searchHud?.onQueryChange((query) => showSearch(setQuery(search, query, sim.listNodes())));
+  // Typing does NOT search here: the round trip is submitted with Enter, and
+  // `setContentQuery` deliberately leaves the previous answer on screen.
+  contentSearchHud?.onQueryChange((query) =>
+    showContentSearch(setContentQuery(contentSearch, query)),
+  );
   rootHud?.onTextChange((text) => showRoot(setText(rootPrompt, text)));
 
   window.addEventListener("keydown", (event) => {
@@ -268,6 +357,61 @@ function boot(): void {
       return;
     }
 
+    // The content search goes before the name search and after the two above.
+    // Three consequences, all of them worked out in the plan and none of them a
+    // rule added here: with a docked panel open Escape closes the PANEL first
+    // (the binding above claims it) and a second Escape closes this bar, which
+    // is what VS Code does; F3 is not claimed up there, so it reaches this
+    // binding while the panel is docked, which is the walk; and closing this
+    // bar deliberately leaves a docked panel open, because the file is still
+    // perfectly readable.
+    const contentCommand = interpretContentSearchKey(
+      event,
+      contentSearch.open,
+      isDirty(contentSearch),
+    );
+    if (contentCommand) {
+      // ctrl+shift+F is the browser's own "search in files" in some builds, F3
+      // is find-again, and Enter would submit a form.
+      event.preventDefault();
+      if (contentCommand === "open") {
+        // Only one search is armed at a time, so opening this one closes the
+        // other — otherwise two sets of highlights would share one renderer
+        // channel and the last paint would win.
+        if (search.open) showSearch(closeSearch(search));
+        // Already open: the chord only refocuses and selects, as ctrl+F does.
+        contentSearchHud?.open();
+        if (!contentSearch.open) showContentSearch(openContentSearch(contentSearch));
+      } else if (contentCommand === "submit") {
+        // The browser cannot read the disk, so this is a round trip; the answer
+        // comes back through `onSearchResult`. `submitted` is the state
+        // machine's own copy of the field, and the string the answer will be
+        // matched against.
+        const asked = submitContentSearch(contentSearch);
+        showContentSearch(asked);
+        client.send({ kind: "search", query: asked.submitted });
+      } else if (contentCommand === "next") {
+        const walked = nextOccurrence(contentSearch);
+        showContentSearch(walked);
+        // Whether the step left the file already on screen is `requiresLoad`'s
+        // question, not this handler's: seven occurrences in one document are
+        // one round trip, not seven.
+        const needed = requiresLoad(walked, fileView.path);
+        if (needed !== null) {
+          // Docked, so the graph stays visible beside the match, and as text,
+          // because a diff of a dirty file may not contain the matched line.
+          openFile(needed, "docked", "text");
+        } else {
+          // Same file, next occurrence: only the marking moved, so the panel is
+          // repainted from the state it already holds.
+          showFileView(fileView, true);
+        }
+      } else {
+        showContentSearch(closeContentSearch(contentSearch));
+      }
+      return;
+    }
+
     // Resolved BEFORE the binding is consulted, and handed to it: `search.ts`
     // owns the question of what the walk is resting on, `searchKeys.ts` only
     // reads the keyboard. It is also the path the branch below opens, so the
@@ -286,6 +430,9 @@ function boot(): void {
       // field, would then report "no matches" over a search that had 12.
       // The selection is what lets the next keystroke replace the query, and
       // that fires `input`, which goes through `setQuery`.
+      // The other half of "only one search is armed at a time": the content bar
+      // goes out, taking its highlights with it, before this one lights its own.
+      if (contentSearch.open) showContentSearch(closeContentSearch(contentSearch));
       searchHud?.open();
       if (!search.open) showSearch(openSearch(search));
     } else if (command === "next") {
@@ -313,6 +460,9 @@ function boot(): void {
   window.addEventListener("resize", () => {
     renderer.resize();
     contextHud?.refresh();
+    // The panel's share of the width is measured, not assumed, so it is
+    // re-measured whenever the width it is a share of changes.
+    renderer.setOccludedRight(fileViewHud?.occludedFraction() ?? 0);
   });
   renderer.resize();
   renderer.start();

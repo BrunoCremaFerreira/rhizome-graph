@@ -203,6 +203,61 @@ body {
 }
 
 /*
+ * The content search (ctrl+shift+F) shares the name search's slot and its skin:
+ * only one of them is ever open, so they cannot collide. What keeps them apart
+ * for the reader is the label, which is why it is dimmed but never hidden.
+ */
+#content-search {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid #2a2e34;
+  border-radius: 6px;
+  background: rgba(12, 13, 15, 0.82);
+  color: #d5d9df;
+  font: 12px/1.4 system-ui, sans-serif;
+  pointer-events: auto;
+  user-select: none;
+}
+
+/* Same trap as #search: `display: flex` would override the hidden attribute. */
+#content-search[hidden] {
+  display: none;
+}
+
+#content-search .label {
+  flex: 0 0 auto;
+  color: #7f8896;
+  white-space: nowrap;
+}
+
+#content-search #content-search-input {
+  width: 22ch;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+#content-search #content-search-input::placeholder {
+  color: #5c6067;
+}
+
+#content-search #content-search-count {
+  flex: 0 0 auto;
+  color: #5c6067;
+  white-space: nowrap;
+}
+
+/*
  * Observed-root bar (ctrl+L), top centre — the address bar for the project
  * being watched. Same skin as #search, and `pointer-events: auto` is required
  * for the same reason: it is typed into.
@@ -457,11 +512,46 @@ body {
   --diff-hunk-bg: rgba(86, 156, 214, 0.1);
   --diff-hunk-fg: #569cd6;
   --diff-meta-fg: #6e7681;
+
+  /* The content search's marks, in VS Code's own register: every occurrence
+   * tinted, the one the walk rests on distinctly stronger and outlined. Both
+   * are translucent for the reason the stripes above are — a match lands on a
+   * green or a red row as often as on a plain one, and the syntax colours have
+   * to stay readable through it. */
+  --mark-bg: rgba(234, 92, 0, 0.33);
+  --mark-active-bg: rgba(234, 92, 0, 0.62);
+  --mark-active-edge: #f2a25c;
+
   --gutter-fg: #6e7681;
   --gutter-bg: rgba(255, 255, 255, 0.02);
   /* Overwritten per paint by fileViewHud; this is only the width before the
    * first document arrives. */
   --gutter-ch: 1ch;
+}
+
+/*
+ * Docked to the right, for the search walk: `F3` steps from hit to hit and the
+ * tree behind the panel is the thing being navigated, so it stays visible and
+ * clickable. `pointer-events: none` on the container is the load-bearing one —
+ * the flex box still covers the whole window, and without this it keeps eating
+ * every click meant for a file dot, leaving the graph as dead as it is under
+ * the modal with nothing on screen to explain why. The panel itself takes them
+ * back, because its body is scrolled and its close button is clicked.
+ */
+#file-view.docked {
+  pointer-events: none;
+  justify-content: flex-end;
+}
+
+#file-view.docked #file-view-panel {
+  pointer-events: auto;
+  width: 40vw;
+  height: 100vh;
+}
+
+/* No dimming: the graph beside the panel is being read at the same time. */
+#file-view.docked #file-view-backdrop {
+  display: none;
 }
 
 #file-view #file-view-head {
@@ -635,4 +725,22 @@ body {
 /* The preamble and the annotations: present, and out of the way. */
 #file-view #file-view-body .row.meta > .code {
   color: var(--diff-meta-fg);
+}
+
+/*
+ * A search match, and the occurrence the walk is resting on. A background and
+ * nothing else: the colour of the text is the grammar's to decide, and taking
+ * it over would tell the reader a keyword is a string.
+ */
+#file-view #file-view-body .row > .code .match {
+  background: var(--mark-bg);
+  border-radius: 2px;
+}
+
+#file-view #file-view-body .row > .code .match.active {
+  background: var(--mark-active-bg);
+  /* An outline rather than a second hue: "which one is current" is then
+   * answered by shape as well as by weight, including where a row's own stripe
+   * already tints the background. */
+  box-shadow: 0 0 0 1px var(--mark-active-edge);
 }

@@ -30,6 +30,19 @@
  *  - Enter with nothing focused keeps today's meaning, "next";
  *  - focus is not a reason to claim a key while the box is CLOSED -- Enter then
  *    still belongs to the rest of the page.
+ *
+ * A third defect motivates `shiftKey`. The branch above answers "open" for ANY
+ * ctrl/meta plus a key that lowercases to "f", and `SearchKeyEvent` cannot even
+ * SEE a shift -- so ctrl+shift+F opens the name box. That chord is being freed
+ * for the content search, and a binding added while this holds either sits
+ * behind the name search in the chain and never fires, or sits in front of it
+ * and silently changes what the assertions above describe. A shifted ctrl+F
+ * must answer null and fall through to whoever is next.
+ *
+ * The field is OPTIONAL, and that half is a compile-time claim rather than a
+ * runtime one: `key()` below builds objects without it, so a required field
+ * would turn one semantic change into a diff across every case in this file.
+ * Absent means false, which is the unshifted meaning.
  */
 
 import { describe, it, expect } from "vitest";
@@ -38,6 +51,25 @@ import { interpretSearchKey } from "../src/searchKeys";
 /** A key event reduced to what the binding actually looks at. */
 function key(k: string, mods: { ctrlKey?: boolean; metaKey?: boolean } = {}) {
   return { key: k, ctrlKey: mods.ctrlKey ?? false, metaKey: mods.metaKey ?? false };
+}
+
+/**
+ * The same reduction, plus the shift the binding is gaining sight of.
+ *
+ * Deliberately NOT folded into `key()` above: that helper is what the pinned
+ * cases are written against, and widening it would edit them by proxy. It is
+ * also a function rather than an inline literal at the call site because an
+ * object literal carrying `shiftKey` is an excess-property error against
+ * today's `SearchKeyEvent` -- and this test must fail on its assertion, not on
+ * a type it is waiting for.
+ */
+function shiftedKey(k: string, mods: { ctrlKey?: boolean; metaKey?: boolean } = {}) {
+  return {
+    key: k,
+    ctrlKey: mods.ctrlKey ?? false,
+    metaKey: mods.metaKey ?? false,
+    shiftKey: true,
+  };
 }
 
 const OPEN = true;
@@ -131,5 +163,31 @@ describe("interpretSearchKey", () => {
   it("ignores a modified key that is not the search shortcut", () => {
     // ctrl+a, ctrl+c and friends belong to the browser and to the input.
     expect(interpretSearchKey(key("a", { ctrlKey: true }), OPEN, NO_FILE)).toBe(null);
+  });
+
+  it("leaves ctrl+shift+F to the rest of the page when the box is closed", () => {
+    // The chord the content search claims. Today the shift is invisible here
+    // and the name box answers first, which is the whole defect.
+    expect(interpretSearchKey(shiftedKey("F", { ctrlKey: true }), CLOSED, NO_FILE)).toBe(null);
+  });
+
+  it("leaves ctrl+shift+F alone even while the name search is already open", () => {
+    // Openness must not become a claim on the key: a user who has the name box
+    // up is exactly the user most likely to reach for the content search next.
+    expect(interpretSearchKey(shiftedKey("F", { ctrlKey: true }), OPEN, NO_FILE)).toBe(null);
+  });
+
+  it("leaves cmd+shift+F alone, since a mac user reaches for the same chord", () => {
+    expect(interpretSearchKey(shiftedKey("F", { metaKey: true }), CLOSED, NO_FILE)).toBe(null);
+  });
+
+  it("still opens on a ctrl+f that names no shiftKey at all", () => {
+    // The optional half, asserted at compile time as much as at run time: an
+    // event object with no `shiftKey` property must remain a legal
+    // `SearchKeyEvent` and must still mean "open". A required field would make
+    // this line -- and every case above it -- a type error.
+    expect(interpretSearchKey({ key: "f", ctrlKey: true, metaKey: false }, CLOSED, NO_FILE)).toBe(
+      "open",
+    );
   });
 });

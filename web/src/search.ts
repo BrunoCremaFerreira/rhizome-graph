@@ -55,6 +55,15 @@ const FRAME_FILL = 0.85;
 const FALLBACK_ASPECT = 1;
 
 /**
+ * Widest slice of the viewport a docked panel is allowed to claim, for framing.
+ *
+ * The width-driven fit divides by `1 - f`, so `f = 1` is a division by zero and
+ * anything close to it a half-height no camera can use. Capping keeps the answer
+ * finite whatever the measurement says.
+ */
+const MAX_OCCLUDED_RIGHT = 0.9;
+
+/**
  * Whether a lowercased path matches a slashless query.
  *
  * The name itself matches by substring; the path also matches when the query
@@ -244,13 +253,40 @@ export interface FramePoint {
  * and its only file) must not dive into the bloom, and matches flung apart by a
  * force layout that has not settled must not push the camera past the limit it
  * is allowed to reach.
+ *
+ * `occludedRight` is the fraction of the VIEWPORT'S WIDTH covered on the right
+ * by the docked panel -- `0.4` when it hides two fifths of the canvas, `0` when
+ * it is closed or drawn as a modal. The renderer passes a MEASUREMENT (the
+ * panel's width over the canvas width), never a copy of the panel's `40vw` CSS
+ * constant: the number that matters is what is actually on screen, and the two
+ * part company at every width where the panel's own min/max sizing bites.
+ *
+ * The geometry: the usable band runs from `-halfW` to `halfW * (1 - 2f)`, so its
+ * centre sits at `-halfW * f` and the target moves right by `halfW * f` to put
+ * the matches in it. Only the WIDTH-driven term is divided by `(1 - f)`, because
+ * the panel eats width alone -- inflating a height-bound frame would zoom out of
+ * matches that were already clear of the panel. `f` is clamped to `[0, 0.9]`,
+ * and anything non-finite, negative or `>= 1` degrades to `0`: a panel claiming
+ * the whole width would divide by zero and hand the camera an infinite
+ * half-height, the same class of bug the `safeAspect` guard below exists for. The
+ * MIN/MAX clamp is applied AFTER the divisor, or a spread already at the limit
+ * would be pulled back past what the view accepts and frame nothing.
  */
-export function frameMatches(points: readonly FramePoint[], aspect: number): ViewTarget | null {
+export function frameMatches(
+  points: readonly FramePoint[],
+  aspect: number,
+  occludedRight = 0,
+): ViewTarget | null {
   if (points.length === 0) return null;
 
   // A zero-height canvas on the first layout pass makes the aspect 0, Infinity
   // or NaN; any of them would hand the camera a NaN half-height.
   const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : FALLBACK_ASPECT;
+
+  const occluded =
+    Number.isFinite(occludedRight) && occludedRight > 0 && occludedRight < 1
+      ? Math.min(occludedRight, MAX_OCCLUDED_RIGHT)
+      : 0;
 
   let minX = Infinity;
   let maxX = -Infinity;
@@ -265,13 +301,14 @@ export function frameMatches(points: readonly FramePoint[], aspect: number): Vie
 
   const needed = Math.max(
     (maxY - minY) / 2 / FRAME_FILL,
-    (maxX - minX) / 2 / safeAspect / FRAME_FILL,
+    (maxX - minX) / 2 / safeAspect / FRAME_FILL / (1 - occluded),
     SEARCH_FOCUS_HALF_HEIGHT,
   );
+  const halfHeight = Math.min(MAX_HALF_HEIGHT, Math.max(MIN_HALF_HEIGHT, needed));
 
   return {
-    centerX: (minX + maxX) / 2,
+    centerX: (minX + maxX) / 2 + halfHeight * safeAspect * occluded,
     centerY: (minY + maxY) / 2,
-    halfHeight: Math.min(MAX_HALF_HEIGHT, Math.max(MIN_HALF_HEIGHT, needed)),
+    halfHeight,
   };
 }

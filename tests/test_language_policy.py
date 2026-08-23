@@ -50,8 +50,17 @@ SCANNED_DIRS = (
     "packaging",
 )
 
-#: Individually scanned files that sit at the repository root.
-SCANNED_FILES = ("start.sh", "run.sh", "CLAUDE.md", "README.md")
+#: Individually scanned files, named by their path relative to the repository
+#: root -- the same convention SCANNED_DIRS uses for `web/src` and
+#: `.claude/agents`. `web/index.html` is one level ABOVE a scanned directory,
+#: so only naming it here reaches it.
+SCANNED_FILES = (
+    "start.sh",
+    "run.sh",
+    "CLAUDE.md",
+    "README.md",
+    "web/index.html",
+)
 
 #: `""` is the suffix of `debian/control`, `debian/changelog` and every other
 #: maintainer file dpkg names without an extension, and naming a directory above
@@ -174,6 +183,23 @@ def test_the_policy_actually_reads_something() -> None:
     assert any(
         "rhizome_graph" in path.parts for path in files
     ), "the Python package is not being scanned; SCANNED_DIRS names a directory that is gone"
+
+
+def test_the_page_shell_is_scanned() -> None:
+    """`web/index.html` is authored text a user reads, so it must be covered.
+
+    The page carries the search box's placeholder, the keys legend and the
+    `aria-label` on the viewer's close button, yet it sat outside the policy
+    entirely: it lives one level ABOVE `web/src`, so recursing that directory
+    never reaches it, and `.html` in SCANNED_SUFFIXES only ever applies to a
+    file found under a scanned directory. Nothing named it, so nothing read it.
+    """
+    scanned = {path.resolve() for path in _scanned_files()}
+
+    assert (REPO_ROOT / "web" / "index.html").resolve() in scanned, (
+        "web/index.html is not being scanned: it is under no SCANNED_DIRS tree "
+        "and named in no list of individually scanned files"
+    )
 
 
 def test_no_portuguese_in_authored_sources() -> None:

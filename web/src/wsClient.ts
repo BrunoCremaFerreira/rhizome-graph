@@ -12,6 +12,7 @@ import {
   parseMeta,
   parseReset,
   parseRootError,
+  parseSearchResult,
   parseStatus,
   type AgentEvent,
   type DaemonMeta,
@@ -20,6 +21,7 @@ import {
   type RootCompletion,
   type RootError,
   type RootReset,
+  type SearchResult,
 } from "./protocol";
 import { readToken, withToken } from "./token";
 
@@ -30,6 +32,7 @@ export type ResetSink = (reset: RootReset) => void;
 export type RootErrorSink = (error: RootError) => void;
 export type FileViewSink = (view: FileView) => void;
 export type StatusSink = (status: GitStatus) => void;
+export type SearchResultSink = (result: SearchResult) => void;
 
 export interface WsClientOptions {
   /** Backoff floor / ceiling in ms. */
@@ -57,6 +60,14 @@ export interface WsClientOptions {
    * would otherwise see this frame fall through to `parseEvent`.
    */
   readonly onStatus?: StatusSink;
+  /**
+   * The daemon's answer to a content search. Optional and consumed either way,
+   * for the same reason as the frames above — and here the fall-through is
+   * measured rather than assumed: `parseEvent` ignores `kind`, so a result frame
+   * that also carried `ts`/`agent`/`type`/`path`/`color` would reach `onEvent`
+   * and grow a node named after an answer to a search.
+   */
+  readonly onSearchResult?: SearchResultSink;
 }
 
 /** Used only outside a browser (tests, SSR); real pages derive from location. */
@@ -107,6 +118,7 @@ export class WsClient {
   private readonly onRootError: RootErrorSink | undefined;
   private readonly onFileView: FileViewSink | undefined;
   private readonly onStatus: StatusSink | undefined;
+  private readonly onSearchResult: SearchResultSink | undefined;
 
   constructor(
     private readonly url: string,
@@ -121,6 +133,7 @@ export class WsClient {
     this.onRootError = options.onRootError;
     this.onFileView = options.onFileView;
     this.onStatus = options.onStatus;
+    this.onSearchResult = options.onSearchResult;
     this.delay = this.minDelay;
   }
 
@@ -224,6 +237,15 @@ export class WsClient {
     const status = parseStatus(raw);
     if (status) {
       this.onStatus?.(status);
+      return;
+    }
+    // Before `parseEvent` as well, and consumed with or without a sink: an
+    // answer to a search names files it did NOT change, so routing it on would
+    // flash every match in the graph — and `parseEvent` ignores `kind`, so only
+    // the ordering keeps such a frame out of the simulation.
+    const searchResult = parseSearchResult(raw);
+    if (searchResult) {
+      this.onSearchResult?.(searchResult);
       return;
     }
     const event = parseEvent(raw);

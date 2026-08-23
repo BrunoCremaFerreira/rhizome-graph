@@ -36,6 +36,17 @@ export type CodeLine = readonly CodeToken[];
 /** The tokens of one tokenized fragment, a line at a time. */
 export type CodeChunk = readonly CodeLine[];
 
+/**
+ * WHERE the panel sits: over the graph, or beside it.
+ *
+ * A click asked for one file and the reader wants it whole, so it gets the
+ * full-window modal it has always had. A search walk is the opposite: `F3`
+ * steps from hit to hit and the tree behind the panel is the thing being
+ * navigated, so the panel docks to one side and leaves the graph visible and
+ * clickable.
+ */
+export type FileViewPlacement = "modal" | "docked";
+
 export interface FileViewState {
   /** True while the panel covers the graph. */
   readonly open: boolean;
@@ -57,6 +68,15 @@ export interface FileViewState {
    * the state always describe the content in the state.
    */
   readonly highlight: readonly CodeChunk[] | null;
+  /**
+   * Where the panel is drawn. It is STATE and not an argument to the painter
+   * because the content is a round trip: the request opens the panel and the
+   * daemon's frame lands milliseconds later, so a placement living only at the
+   * call that paints would let a late answer arrive in a different layout than
+   * the one the request opened — a docked panel flipping to a modal mid-read.
+   * Carried by every transition, and only {@link closeView} resets it.
+   */
+  readonly placement: FileViewPlacement;
 }
 
 /** A closed panel: no file, nothing in flight, nothing to show. */
@@ -71,6 +91,9 @@ export function createFileView(): FileViewState {
     truncated: false,
     error: "",
     highlight: null,
+    // Modal unless something asks otherwise: a click is the opener until
+    // proven otherwise, and it is the placement every existing caller expects.
+    placement: "modal",
   };
 }
 
@@ -81,9 +104,18 @@ export function createFileView(): FileViewState {
  * clicks again — so the panel appears immediately, in `loading`. The previous
  * file's content, truncation notice and error go with it: one file's diff under
  * another file's name is exactly what this feature must never show.
+ *
+ * `placement` is defaulted, so every two-argument call site keeps the modal it
+ * has always got, and it is written AFTER the spread of {@link createFileView}
+ * — that spread carries the `"modal"` default and would otherwise silently
+ * overrule the caller's request.
  */
-export function requestView(_state: FileViewState, path: string): FileViewState {
-  return { ...createFileView(), open: true, loading: true, path };
+export function requestView(
+  _state: FileViewState,
+  path: string,
+  placement: FileViewPlacement = "modal",
+): FileViewState {
+  return { ...createFileView(), open: true, loading: true, path, placement };
 }
 
 /**
@@ -103,6 +135,10 @@ export function requestView(_state: FileViewState, path: string): FileViewState 
  * The tokens go with the old content: colour describes the text it was computed
  * from, and colour is a strict enhancement, so dropping it is always safe while
  * keeping it is not.
+ *
+ * The `placement` rides along in the spread and must keep doing so: this is the
+ * transition where a docked panel would flip to a modal mid-read, because it is
+ * the one that rebuilds the state from the daemon's frame.
  */
 export function applyView(state: FileViewState, frame: FileView): FileViewState {
   if (!state.open) return state;
@@ -160,7 +196,9 @@ export function failView(state: FileViewState, reason: string): FileViewState {
  * Dismiss the panel, leaving no trace.
  *
  * Everything is dropped, including a reply still in flight, so the next click
- * neither flashes the previous file nor inherits its failure.
+ * neither flashes the previous file nor inherits its failure. The placement
+ * goes back to `"modal"` with it: the next opener is a click until proven
+ * otherwise.
  */
 export function closeView(_state: FileViewState): FileViewState {
   return createFileView();

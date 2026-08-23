@@ -334,6 +334,91 @@ export function parseFileView(raw: unknown): FileView | null {
 }
 
 /**
+ * One file the daemon found the query in, and how often.
+ *
+ * `count` is the daemon's number, not the browser's: the walk indexes into it
+ * and the counter sums it, so it is a non-negative integer or the entry is not
+ * worth having (see {@link parseSearchResult}).
+ */
+export interface FileMatchCount {
+  /** Path relative to the observed root. */
+  path: string;
+  /** How many occurrences the daemon counted in that file. */
+  count: number;
+}
+
+/**
+ * The daemon's answer to a content search, pushed on the same socket as events.
+ *
+ * The browser cannot read the disk, so "which files mention this?" is a ROUND
+ * TRIP: the page submits a query and this frame comes back. `query` is the
+ * submission this frame ANSWERS, and it is what lets the state machine drop an
+ * answer to a query the user has already typed over.
+ */
+export interface SearchResult {
+  /** The query this answer is about; `""` is a value the daemon really sends. */
+  query: string;
+  /** The files it matched, in the order the daemon walked them. */
+  files: FileMatchCount[];
+  /** Whether the daemon cut the walk short. */
+  truncated: boolean;
+  /** Why the daemon could not answer, or `""` when it could. */
+  error: string;
+}
+
+/** Whether `value` is a count the walk can index with: a non-negative integer. */
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * Validate and parse a raw WebSocket message into a {@link SearchResult}.
+ *
+ * Contract (see tests/searchProtocol.test.ts):
+ *   - `kind` must be exactly `"searchResult"`. The gate is load-bearing in both
+ *     directions, as `parseStatus`'s is: an answer routed as activity would grow
+ *     a node called "searchResult" in the graph, and an activity event mistaken
+ *     for an answer would replace the counts of a real submission.
+ *   - `query` is the one field whose absence costs the frame, exactly as `path`
+ *     costs {@link parseFileView} its frame. An answer naming no query cannot be
+ *     matched to the submission that asked for it, and the supersede guard IS
+ *     that comparison. `""` is a legitimate value, not an absence.
+ *   - `files` DEGRADES the way `parseStatus`'s `entries` does: absent or
+ *     mistyped becomes `[]`, and a junk item is dropped ONE AT A TIME. An entry
+ *     needs a string `path` (a row naming no file cannot be opened) and a count
+ *     that is a non-negative integer — half an occurrence has no position to
+ *     walk to, and a negative or non-finite one shifts every later file's global
+ *     index, sending the walk to the wrong FILE rather than the wrong line.
+ *   - `truncated` and `error` fall back to `false` and `""`. Dropping the frame
+ *     over them would leave the bar pending forever on a reply that did arrive.
+ *   - Order is preserved; the walk belongs to `contentSearch.ts`.
+ *   - NEVER throws: this comes off the network.
+ */
+export function parseSearchResult(raw: unknown): SearchResult | null {
+  if (!isRecord(raw)) return null;
+  if (raw.kind !== "searchResult") return null;
+  if (typeof raw.query !== "string") return null;
+
+  const files: FileMatchCount[] = [];
+  if (Array.isArray(raw.files)) {
+    for (const item of raw.files) {
+      if (!isRecord(item)) continue;
+      const { path, count } = item;
+      if (typeof path !== "string") continue;
+      if (!isCount(count)) continue;
+      files.push({ path, count });
+    }
+  }
+
+  return {
+    query: raw.query,
+    files,
+    truncated: raw.truncated === true,
+    error: typeof raw.error === "string" ? raw.error : "",
+  };
+}
+
+/**
  * How git sees a path that is not committed yet.
  *
  * The four words this page knows how to draw. A newer daemon reporting a fifth

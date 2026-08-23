@@ -20,6 +20,14 @@
  * through a query would throw a modal over the graph on every single step. With
  * nothing focused Enter keeps its old meaning, so the key never goes dead.
  *
+ * A shifted ctrl+F is NOT this search. `ctrl+shift+F` is the content search --
+ * grep across the observed tree, a different question from "which file is
+ * called this" -- and the browser reports the shifted `key` as "F", which
+ * lowercases to the same letter as the unshifted chord. So the shift has to be
+ * read, or the two bindings collide: whichever the page consults second never
+ * fires. Answering null hands the chord to the next handler in the chain and
+ * leaves every other meaning of ctrl+F exactly as it was.
+ *
  * `fileFocused` is passed IN rather than worked out here. This module reads a
  * keyboard event and nothing else -- the tree, the match list and the walk live
  * in {@link ./search}, which answers the question with `focusedFilePath`. Taking
@@ -32,6 +40,13 @@ export interface SearchKeyEvent {
   readonly key: string;
   readonly ctrlKey: boolean;
   readonly metaKey: boolean;
+  /**
+   * OPTIONAL, and it stays optional: absent means false, which is the
+   * unshifted meaning and the safe default. Requiring it would make every
+   * caller that builds a plain object -- the pinned tests included -- a
+   * compile error over a one-line semantic change.
+   */
+  readonly shiftKey?: boolean;
 }
 
 /**
@@ -52,9 +67,10 @@ export function interpretSearchKey(
   fileFocused: boolean,
 ): SearchCommand | null {
   if (event.ctrlKey || event.metaKey) {
-    // The browser reports `key` with the modifiers already applied, so a stray
-    // shift or caps lock would otherwise silently disable the shortcut. cmd is
-    // the same shortcut: it is what a mac user reaches for.
+    // The browser reports `key` with the modifiers already applied, so caps
+    // lock would otherwise silently disable the shortcut. cmd is the same
+    // shortcut: it is what a mac user reaches for.
+    if (event.shiftKey) return null; // ctrl+shift+F belongs to the content search.
     return event.key.toLowerCase() === "f" ? "open" : null;
   }
 

@@ -78,6 +78,7 @@ from rhizome_graph.cli import (
     page_url,
     settings_from,
 )
+from rhizome_graph.content_search import content_search, search_frame
 from rhizome_graph.file_view import file_view
 from rhizome_graph.ipc import socket_is_live
 from rhizome_graph.normalize import (
@@ -455,7 +456,7 @@ def _encode(event: Event) -> str:
 
 #: The only kinds a client may send. Anything else is a browser from another
 #: version talking to this daemon, not an instruction.
-COMMAND_KINDS = ("complete", "setRoot", "file")
+COMMAND_KINDS = ("complete", "setRoot", "file", "search")
 
 
 def parse_command(raw: str) -> dict | None:
@@ -463,12 +464,36 @@ def parse_command(raw: str) -> dict | None:
 
     This is data typed by a human into a field and shipped over a socket, so it
     must **never raise**: an exception here kills the task serving that browser.
-    Every unrecognized shape -- malformed JSON, a bare array, a missing or
-    non-string ``path`` -- collapses to ``None``.
+    Every unrecognized shape -- malformed JSON, a bare array, a missing
+    required field -- collapses to ``None``.
 
-    The path is handed on exactly as typed: trimming and ``~`` expansion belong
-    to :mod:`rhizome_graph.paths`, and the answer echoes this text back so the page
-    can tell whether it still matches what the viewer has in the field.
+    **Which field is required depends on the kind.** ``complete``, ``setRoot``
+    and ``file`` each name a ``path`` and are refused without a string one;
+    ``search`` names a ``query`` instead and is refused without a string one.
+    Reusing ``path`` for the query would be a lie: both gates below echo
+    ``command["path"]`` back in their refusal, so a query smuggled through it
+    would be quoted at the user as the path that was refused. A ``search``
+    therefore parses with ``path: ""`` -- the echo field is still there, and it
+    holds the only path a search has.
+
+    The parsed mapping always carries ``kind``, ``path`` and ``token``; a fourth
+    key appears **only** when the frame carried it in a form this daemon
+    understands for that kind, so ``query`` is present for a ``search`` and
+    absent everywhere else, and ``prefer`` is present for a ``file`` **only**
+    when the frame said exactly ``"text"`` -- absent, ``"diff"``, ``"TEXT"`` or a
+    number all parse without it and so reach today's diff-first chain. That
+    reading is the fail-safe one: the worst case of dropping the key is a diff
+    where text was wanted, while the worst case of guessing at it is a read
+    route reached by accident. That is the rule the conditional ``repo`` key
+    follows on the status side, and here it is what keeps the shape of the three
+    older commands byte-identical: an unconditional ``query`` would widen every
+    one of them for no behavioural reason.
+
+    The path -- and the query -- are handed on exactly as typed: trimming and
+    ``~`` expansion belong to :mod:`rhizome_graph.paths`, the ASCII fold belongs
+    to :mod:`rhizome_graph.content_search`, and the answer echoes this text back
+    so the page can tell whether it still matches what the viewer has in the
+    field.
 
     Every command carries a ``token``, always the key and never its absence: a
     frame that named none parses to the **empty** token, and anything that is not
@@ -487,15 +512,27 @@ def parse_command(raw: str) -> dict | None:
     if not isinstance(payload, dict):
         return None
     kind = payload.get("kind")
-    path = payload.get("path")
-    if kind not in COMMAND_KINDS or not isinstance(path, str):
+    if kind not in COMMAND_KINDS:
         return None
     token = payload.get("token")
-    return {
+    command = {
         "kind": kind,
-        "path": path,
+        "path": "",
         "token": token if isinstance(token, str) else "",
     }
+    if kind == "search":
+        query = payload.get("query")
+        if not isinstance(query, str):
+            return None
+        command["query"] = query
+        return command
+    path = payload.get("path")
+    if not isinstance(path, str):
+        return None
+    command["path"] = path
+    if kind == "file" and payload.get("prefer") == "text":
+        command["prefer"] = "text"
+    return command
 
 
 def control_allowed(remote_host: str, allow_remote: bool) -> bool:
@@ -716,7 +753,19 @@ class Session:
         treat it as a ``setRoot``", which was fine while those were the only two
         commands and actively wrong the moment a third existed: a ``file`` would
         have fallen through and swapped the observed project for a refusal about
-        a path that is not a directory.
+        a path that is not a directory. Every kind therefore returns from its own
+        branch, and a ``search`` -- which carries the empty path, a string
+        :func:`resolve_root` would happily turn into somewhere -- must never
+        reach the ``setRoot`` tail.
+
+        The search re-reads ``self.root`` after its await, the way
+        :meth:`publish_status` does, with one deliberate difference: status
+        *drops* an answer about a root the daemon has left, and this one answers
+        anyway, empty and with the reason. Those rows are not merely stale, they
+        are clickable and ``resolve_inside`` refuses every one of them under the
+        new root -- but a dropped reply leaves the browser's ``pending`` flag set
+        forever with no second reply coming, and status has a second publisher
+        where a search has none.
         """
         path = command["path"]
         kind = command["kind"]
@@ -724,7 +773,23 @@ class Session:
             await _send(websocket, completion_response(path, self.home))
             return
         if kind == "file":
-            await _send(websocket, await file_view(self.root, path))
+            # Only a frame that asked for text in the one spelling the parser
+            # understands turns the diff off; everything else keeps the chain
+            # the status-panel click depends on.
+            allow_diff = command.get("prefer") != "text"
+            await _send(
+                websocket,
+                await file_view(self.root, path, allow_diff=allow_diff),
+            )
+            return
+        if kind == "search":
+            asked_about = self.root
+            frame = await content_search(asked_about, command["query"])
+            if self.root != asked_about:
+                frame = search_frame(
+                    command["query"], [], False, "the observed project changed"
+                )
+            await _send(websocket, frame)
             return
         if kind != "setRoot":
             return

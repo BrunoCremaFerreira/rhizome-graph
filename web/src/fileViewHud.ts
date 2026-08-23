@@ -37,7 +37,7 @@
 
 import { interpretFileViewClick } from "./fileViewClicks";
 import type { FileViewState } from "./fileView";
-import type { FileDoc, Row } from "./fileDoc";
+import type { CodeToken, FileDoc, MarkedSpan, Row } from "./fileDoc";
 import type { FileViewMode } from "./protocol";
 
 /** Shown in the body while the daemon's answer is still travelling. */
@@ -66,8 +66,21 @@ export interface FileViewHud {
    *
    * `keepScroll` is for the repaint that only adds colour to text already on
    * screen; every other paint is a new file, which starts at its first line.
+   * An active occurrence outranks both: a match the user stepped to is worth
+   * nothing off screen.
    */
   render(state: FileViewState, doc: FileDoc, keepScroll: boolean): void;
+  /**
+   * How much of the window's width this panel is covering on the right, as a
+   * fraction, or `0` when it covers nothing that matters to the graph.
+   *
+   * A measurement of its own box, which is what this module is allowed to know:
+   * the camera needs the number (see `frameMatches`) and the alternative is a
+   * copy of the stylesheet's `40vw` living in TypeScript, which would be wrong
+   * the first time the CSS changed. A modal reads as `0` on purpose — it covers
+   * the graph entirely, and there is no visible band left to aim the camera at.
+   */
+  occludedFraction(): number;
   /**
    * Call `handler` when a click asks for the panel to close, so the caller can
    * take the one close path Escape already takes.
@@ -91,22 +104,40 @@ export function createFileViewHud(container: HTMLElement): FileViewHud {
     return el;
   }
 
-  /** The code column: the syntax tokens if they arrived, else the raw line. */
+  /** One fragment of a line, wearing the style the grammar gave it. */
+  function fragment(token: CodeToken): HTMLSpanElement {
+    const span = document.createElement("span");
+    span.textContent = token.text;
+    span.style.color = token.color;
+    if (token.italic) span.style.fontStyle = "italic";
+    if (token.bold) span.style.fontWeight = "bold";
+    return span;
+  }
+
+  /** The same, plus what the search made of it — a CLASS, so the two shades
+   * live in the stylesheet next to the diff palette rather than in here. */
+  function markedFragment(span: MarkedSpan): HTMLSpanElement {
+    const el = fragment(span);
+    if (span.mark === "match") el.classList.add("match");
+    else if (span.mark === "active") el.classList.add("match", "active");
+    return el;
+  }
+
+  /** The code column: the search's spans, else the syntax tokens, else text. */
   function codeCell(row: Row): HTMLSpanElement {
     const el = document.createElement("span");
     el.className = "code";
+    // The spans are the tokens already cut at the match boundaries, so they
+    // replace them rather than sitting beside them.
+    if (row.spans !== null) {
+      for (const span of row.spans) el.append(markedFragment(span));
+      return el;
+    }
     if (row.tokens === null) {
       el.textContent = row.text;
       return el;
     }
-    for (const token of row.tokens) {
-      const span = document.createElement("span");
-      span.textContent = token.text;
-      span.style.color = token.color;
-      if (token.italic) span.style.fontStyle = "italic";
-      if (token.bold) span.style.fontWeight = "bold";
-      el.append(span);
-    }
+    for (const token of row.tokens) el.append(fragment(token));
     return el;
   }
 
@@ -136,6 +167,24 @@ export function createFileViewHud(container: HTMLElement): FileViewHud {
     bodyEl.replaceChildren(fragment);
   }
 
+  /**
+   * Centre the active occurrence's row, answering whether it moved the scroll.
+   *
+   * Measured against the body's own box rather than `offsetTop`, which is
+   * relative to whichever ancestor happens to be positioned, and via
+   * `scrollTop` rather than `scrollIntoView`, which would also scroll the page
+   * the panel is floating over.
+   */
+  function scrollToActive(doc: FileDoc): boolean {
+    if (!bodyEl || doc.rows === null || doc.activeRow === null) return false;
+    const rowEl = bodyEl.children[doc.activeRow];
+    if (!(rowEl instanceof HTMLElement)) return false;
+    const offset = rowEl.getBoundingClientRect().top - bodyEl.getBoundingClientRect().top;
+    const centred = offset - (bodyEl.clientHeight - rowEl.offsetHeight) / 2;
+    bodyEl.scrollTop = Math.max(0, bodyEl.scrollTop + centred);
+    return true;
+  }
+
   return {
     open(): void {
       container.hidden = false;
@@ -160,6 +209,9 @@ export function createFileViewHud(container: HTMLElement): FileViewHud {
     },
 
     render(state: FileViewState, doc: FileDoc, keepScroll: boolean): void {
+      // One class, and the stylesheet does the rest: where the panel sits is a
+      // decision of the state machine, not of this painter.
+      container.classList.toggle("docked", state.placement === "docked");
       if (pathEl) pathEl.textContent = state.path;
       // No mode while the answer is still coming: the daemon, not the click,
       // decides whether this is a diff, text or a hex dump.
@@ -186,8 +238,20 @@ export function createFileViewHud(container: HTMLElement): FileViewHud {
       else if (doc.rows !== null) paintRows(doc, doc.rows);
       else paintPlain(doc.plain);
       // A new file starts at its first line; only the colouring repaint of the
-      // very text already on screen keeps where it was read to.
-      bodyEl.scrollTop = keepScroll ? scroll : 0;
+      // very text already on screen keeps where it was read to. An active
+      // occurrence overrides both — it is the reason the panel is open.
+      if (!scrollToActive(doc)) bodyEl.scrollTop = keepScroll ? scroll : 0;
+    },
+
+    occludedFraction(): number {
+      // Hidden, or covering the whole window as a modal: nothing to steer the
+      // camera around. The `docked` class is this painter's own, set in
+      // `render` from the placement the state machine decided.
+      if (container.hidden || !container.classList.contains("docked")) return 0;
+      const panel = container.querySelector<HTMLElement>("#file-view-panel");
+      const width = container.clientWidth;
+      if (!panel || width <= 0) return 0;
+      return panel.getBoundingClientRect().width / width;
     },
 
     onClose(handler: () => void): void {
