@@ -3,7 +3,7 @@
  *
  * The defect: the ramp has no absolute meaning and nothing on screen says so.
  * The scale is ROOT-RELATIVE and MEDIAN-HINGED (decisions 6 and 8 of
- * `docs/features/todo/size-mode.md`), so red means "far up THIS project's own
+ * `docs/features/done/2026-08-25-22-17-size-mode.md`), so red means "far up THIS project's own
  * distribution" and nothing else -- the same file is blue in one project and
  * red in another, and below the median a factor of ten moves the colour a
  * different distance than a factor of ten above it. A spectrum whose anchors

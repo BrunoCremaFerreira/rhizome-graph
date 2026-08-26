@@ -129,6 +129,7 @@ rhizome_graph/checkouts.py  # pure: which checkouts sit BELOW a path (the downwa
 rhizome_graph/status.py     # pure parse of `git status --porcelain -z`, the fan-out, the frame
 rhizome_graph/file_view.py  # what a clicked file shows: diff, else text, else hex
 rhizome_graph/content_search.py # which files hold this string (forks nothing, imports no `re`)
+rhizome_graph/sizes.py      # how big is every file the graph draws (opens nothing, forks nothing)
 rhizome_graph/cli.py        # pure: argv + environ + cwd → frozen Settings; `rhi` itself
 rhizome_graph/assets.py     # pure: where THIS installation keeps web/dist, and the hook command
 rhizome_graph/ipc.py        # is that socket live? is that port free? (answers, never raises)
@@ -149,6 +150,9 @@ web/src/search.ts           # pure: match, the walk over matches, and the camera
 web/src/matchRanges.ts      # pure: the ASCII fold + the non-overlapping occurrences in a text
 web/src/contentSearch.ts    # pure: the ctrl+shift+F state machine (submit, adopt, walk, mark)
 web/src/contentSearchKeys.ts # pure: what ctrl+shift+F / Enter / F3 / Esc mean
+web/src/sizeColor.ts        # pure: the no-green ramp, the median-hinged scale, the byte format
+web/src/sizeMode.ts         # pure: the F7 round trip (phases, late-answer refusal, the colours)
+web/src/sizeKeys.ts         # pure: what F7 means (and what a modified or repeating F7 is not)
 web/src/rootPrompt.ts       # pure: the ctrl+L bar's state (text, completion, discard on Esc)
 web/src/pick.ts             # pure: which file a click (or the resting pointer) landed on
 web/src/labels.ts           # pure: label size/placement, and which files are named this frame
@@ -164,7 +168,7 @@ web/src/searchKeys.ts       # pure: what ctrl+F / F3 / Esc mean (and what a SHIF
 web/src/branding.ts         # pure: APP_NAME, so the untestable renderer never spells it
 web/src/token.ts            # pure: read the control token, stamp it on a command frame
 web/src/*Hud.ts             # thin DOM painters: context caption, event list, attribution, search
-                            # box, content-search box, git status panel
+                            # box, content-search box, git status panel, size legend
 setup.py / MANIFEST.in      # the ONLY dynamic build step: copy web/dist in, IF it was built
 run.sh / start.sh           # minimal launcher / full bootstrap
 ```
@@ -256,6 +260,60 @@ turns each fix plan into a failing test, and a developer takes it green. `softwa
 enters it at the other end: it shapes the plan *before* the tester is asked for the first RED
 test, and it is the agent to consult when the question is where code belongs rather than what
 it should do.
+
+## Plan files
+
+Plans live under `docs/features/` as a `todo` → `doing` → `done` kanban:
+
+- **`todo/`** — planned, not started.
+- **`doing/`** — implementation under way.
+- **`done/`** — implemented; kept as the historical record of the rationale and of the
+  alternatives that were rejected.
+
+**Whenever a plan is asked for, it MUST be written into `docs/features/todo/`**, with this
+filename pattern:
+
+```
+{YYYY-MM-DD-HH-mm}-{plan_name}.md
+```
+
+Use the current local date and time, zero-padded, and a short kebab-case `plan_name` —
+`2026-08-26-14-07-read-marker-pulse.md`. The timestamp is when the plan was *written*, and it
+never changes as the file moves between folders; it is what keeps a directory listing
+chronological and what tells two plans about the same subject apart.
+
+Every plan opens with a status header, before anything else:
+
+```markdown
+# Plan: <title>
+
+- **Status:** todo | doing | done
+- **Created:** 2026-08-26 14:07
+- **Implemented:** — (date, and the branch it landed on)
+- **PR/commit:** —
+- **Consultations (mandatory):** which specialist agents shaped it, and when
+```
+
+**The folder and the `Status` line are one fact written twice, and they must never disagree.**
+Move the file as the work progresses and fill in `Implemented` and `PR/commit` on completion —
+a plan sitting in `done/` still saying `doing` is a lie told by whichever half the reader
+happens to trust.
+
+The `Consultations` line is rule 2 of "Mandatory rules" leaving a trace: the plan is shaped by
+the specialists, never by the orchestrator alone, so it names them — `software-architect` for a
+change that crosses layers, `security-auditor` for one that touches the network surface, the
+path defences, the `git` runner or the hook, and `developer-tester` before any implementation
+agent is asked for a line of code. A plan's steps are therefore RED/GREEN pairs with an owner
+per step, which is the shape `software-architect` already hands back.
+
+**`done/` is a historical archive, not a description of the current system.** A plan states
+intent *before* the implementation and may have diverged from what was built — a constant was
+corrected, a finding was noted and deliberately not built. When reading any plan, and
+especially one in `done/`, the code is the source of truth and the plan is the reasoning that
+led to it. Only `todo/` and `doing/` are active.
+
+Plans are documents a human reads, so rule 4 applies to them in full: English, like every other
+authored file here.
 
 ## Status
 
@@ -385,12 +443,13 @@ Web MVP implemented and verified end-to-end (TDD).
 - **The observed root is no longer a boot constant.** `ctrl+L` in the page opens a bar that
   swaps it: the WebSocket, once broadcast-only, now also accepts `{"kind":"complete"}` (the
   browser cannot read the disk, so the daemon answers tab-completion) and
-  `{"kind":"setRoot"}`. (`COMMAND_KINDS` is four now — `file` and `search` are the others —
-  and each kind names its OWN required field: a `search` carries a `query` and parses with
-  `path: ""`, which is the echo field both gates put into their refusal, so their code is
-  literally unchanged. Every key beyond `kind`/`path`/`token` is **conditional**, present only
-  when the frame carried it in a form this daemon understands, which is what keeps five pinned
-  exact-equality assertions byte-identical.) `Session.switch_root` stops the watcher, calls `EventHub.reset` —
+  `{"kind":"setRoot"}`. (`COMMAND_KINDS` is five now — `file`, `search` and `sizes` are the
+  others — and each kind names its OWN required field: a `search` carries a `query` and parses
+  with `path: ""`, which is the echo field both gates put into their refusal, so their code is
+  literally unchanged; a `sizes` names nothing at all, and parses with the same empty path. Every
+  key beyond `kind`/`path`/`token` is **conditional**, present only when the frame carried it in a
+  form this daemon understands, which is what keeps five pinned exact-equality assertions
+  byte-identical.) `Session.switch_root` stops the watcher, calls `EventHub.reset` —
   which clears `known_paths`, the seed and the replay, and broadcasts a `reset` frame the
   clients wipe their graph on — re-seeds, and restarts the watcher on the new root. Two
   details are load-bearing: `reset` sits FIRST in `replay_messages()`, so a client connecting
@@ -532,8 +591,9 @@ Web MVP implemented and verified end-to-end (TDD).
     exactly 200 it computes `len(entries) > len(shown)` as `200 > 200` → `truncated: False`: the
     panel claims completeness over a list it cut, while the *same* repository observed directly
     says `True`. One entry more than the frame can show keeps the signal exact in both
-    directions, and 16 × 201 is the same nothing as 16 × 200. The plan this came from had it at
-    200; the correction is written into `docs/features/todo/multi-repo-git-status.md`.
+    directions, and 16 × 201 is the same nothing as 16 × 200. The plan this came from had it
+    at 200; the correction is written into
+    `docs/features/done/2026-08-17-16-21-multi-repo-git-status.md`.
   - **The semaphore is built inside the call, never at module level.** A module-level
     `asyncio.Semaphore` binds to the first loop that waits on it and raises on every loop after
     — swallowed by `git_status`'s blanket `except` into a silent `None`. It passes every
@@ -663,13 +723,13 @@ Web MVP implemented and verified end-to-end (TDD).
     the cost is paid off the event loop: all four `scan_tree` callers already run on a thread, and
     the hook's hot path imports nothing from `tree` or `gitignore`.
   - **Two prices are known and deliberately unpaid,** each noted with its trigger in
-    `docs/features/todo/gitignore-visibility.md`. A deliberately committed `dist/` stays invisible,
-    because the structural set overrules an explicit `.gitignore` (the alternative is a second
-    interaction between two rule systems, and the unbounded case is a repository whose
-    `.gitignore` omits `node_modules`). And a repository with no `.gitignore` at all keeps its
-    `.claude/` hidden, since the presence of the file is the switch — the answer to give first is
-    the empty file, not a trigger on `.git`, which on this repository alone would draw 1 114 files
-    of vendored Python.
+    `docs/features/done/2026-08-26-18-43-gitignore-visibility.md`. A deliberately committed
+    `dist/` stays invisible, because the structural set overrules an explicit `.gitignore` (the
+    alternative is a second interaction between two rule systems, and the unbounded case is a
+    repository whose `.gitignore` omits `node_modules`). And a repository with no `.gitignore`
+    at all keeps its `.claude/` hidden, since the presence of the file is the switch — the
+    answer to give first is the empty file, not a trigger on `.git`, which on this repository
+    alone would draw 1 114 files of vendored Python.
 - **Frontend** (`web/`): 1287/1287 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
   3.23.0 — 4.x needs Node ≥ 20 and this machine has 18) is the first runtime dependency added
   since `d3-force`; note that `npm install` under npm 10 strips the `libc` fields from
@@ -763,7 +823,7 @@ Web MVP implemented and verified end-to-end (TDD).
   `F3` walks **occurrence by occurrence, across files** — each step that crosses into another file
   moves the camera to its node and opens that file in the panel **docked to the right**, matches
   tinted, the active one stronger, scrolled to its row. The staged plan it was built from is
-  `docs/features/todo/content-search.md`. Eleven things are load-bearing:
+  `docs/features/done/2026-08-23-02-51-content-search.md`. Eleven things are load-bearing:
   - **The fold is ASCII-only, and that is a correctness rule, not a shortcut.** `str.lower()` on
     the Latin capital I with a dot above (U+0130) yields **two** characters, in Python and in
     JavaScript alike, so a Unicode fold changes the length of the text and invalidates every
@@ -846,6 +906,77 @@ Web MVP implemented and verified end-to-end (TDD).
     resized — `frameMatches` gained an `occludedRight` fraction instead, clamped below 0.9 and
     applied *after* the `MIN`/`MAX` clamp, and the renderer passes a **measurement** of the panel
     rather than a copy of its `40vw`.
+- **F7 paints the graph by file size, and the scale is the observed project's own.** Colour here
+  had always been a pure function of one path — an extension in `colors.ts`, an author's hash for a
+  flash — evaluated in the per-frame loop. This is the other kind: a **round trip**. The browser
+  cannot stat the disk, so F7 asks, `rhizome_graph/sizes.py` walks the tree and answers a whole
+  distribution, and the browser turns that into one colour per node before the next frame is drawn;
+  F7 again restores the extension colours. The staged plan is
+  `docs/features/done/2026-08-25-22-17-size-mode.md`. Nine things are load-bearing:
+  - **The ramp is a written-down stop table, and it never passes through green.** `hslToInt` is one
+    import away and `hslToInt(240 - 240 * t)` runs straight through green *at the median* — where
+    green is already the `A` flash that says a file was created. So five stops are interpolated per
+    channel and the invariant is `g < max(r, b)` everywhere. Near the middle the margin is ~2/255,
+    and that thinness is inherent: any blue-to-red ramp through a light neutral has to pass a
+    near-tie. What keeps it from reading as green is that the near-tie is **neutral**, not that the
+    margin is wide.
+  - **The scale is hinged at the median, not symmetric.** p10 / p50 / p90 of `log1p(bytes)`, each
+    half divided by its own spread, each spread guarded above zero. A single spread of
+    `max(hi, lo)` empties its own coldest fifth over a home directory, where the file median is 41
+    bytes and the p90 is hundreds of kilobytes. The stated price is that the ramp is no longer a
+    ratio scale — red means "far up THIS project's own distribution", never "twice as big" — which
+    is exactly why the legend prints the three byte anchors rather than a bare gradient.
+  - **Two scales, files and directories, built independently.** A directory is the sum of its files,
+    so on the files' scale two thirds of the directories land in the hottest fifth and the colour
+    says only "directories are big", which is not information. The directories are aggregated in
+    `sizeMode.ts` from the file entries' ancestor paths and **deliberately not** from the live node
+    list: the answer describes the tree the daemon walked, so a directory the browser has and the
+    walk never measured gets no colour at all, which is the correct statement.
+  - **The set measured is the set drawn, by identity.** `sizes.MAX_FILES` **is**
+    `tree.DEFAULT_MAX_FILES`, the same object, and the walk is `scan_tree`'s own — its ignore rules,
+    its symlink drop, its sort, and its cap asked one entry above what is served so that "there was
+    more" is the walk's answer rather than a second count of the same tree. Two constants that
+    happen to both be 20 000 would surface as a tail of grey dots nobody could explain.
+  - **`os.lstat`, and it never raises.** `scan_tree` already drops symlinked files, so the two agree
+    in ordinary operation; what `lstat` buys is the window between the walk and the stat, where a
+    path that became a link reports the link's own size instead of the size of whatever it now
+    points at. A file that vanished inside that window drops its entry: a partial answer is a
+    partial colouring, while an exception is a dead command with the browser holding a `pending`
+    flag nothing will clear.
+  - **`sizes` is the one command that turns no string from the network into anything,** and that is
+    the whole of its security story: it names no field, so there is nothing it can be refused for
+    and no containment check to add. It parses with `path: ""` — the echo field both gates quote in
+    their refusal — and returns from its own branch in the dispatch, so a stray key from an older
+    page costs nothing instead of the whole mode. Like `search` and unlike `publish_status`, an
+    answer about an abandoned root is still **answered**, empty and with the reason, because a
+    dropped reply strands the browser's `pending` flag with no second reply coming. It needs the
+    root re-read more than the search does: a `sizes` frame carries no echo field by which a late
+    answer could be recognized.
+  - **A late answer is refused by identity, and the toggle is unconditional.** `applySizes` returns
+    the **same reference** unless the phase is `pending` — the `applyView` idiom, where
+    `if (next !== state)` is the caller's whole adoption test — and F7 pressed while a walk is in
+    flight **closes** without sending, which is what un-wedges a mode whose request was refused and
+    will never be answered. A `reset` closes it too: the colour map is keyed by the paths of a
+    project the user has left.
+  - **F7 sits first in the keydown chain, above the modal's Escape, and that position is earned.**
+    It is the only binding on the page that is unconditional — the mode has to toggle with the file
+    panel open, with the root bar focused and with either search bar taking keystrokes — so it takes
+    no part in an argument that is only ever about contested keys. `interpretSizeKey` declines every
+    modified F7 and every **repeating** one: held down it repeats at roughly 30 Hz, and every second
+    repeat would be another walk of the whole tree in the executor shared with `scan_tree`,
+    `file_view` and `content_search`. `preventDefault`, because Firefox binds F7 to caret browsing.
+  - **The size colour replaces the base colour and nothing else.** The write flash, the read tint,
+    the idle fade and the point size all still apply on top, so a file being written still flashes
+    amber over its size colour; a search match stays cyan, because the matched branch sits above the
+    size branch in the renderer on purpose. `sizeColors` answering `null` **is** "the mode is off",
+    so the renderer needs no second boolean and the two cannot get out of step, and the per-frame
+    cost is one `Map.get`. An armed mode with no answer for a node paints the grey it already wore
+    (`UNMEASURED_COLOR` **is** `NEUTRAL_NODE_COLOR`, imported rather than respelled — a second
+    near-grey beside the directory grey would be the least legible pair this page could contain).
+    The legend is an element of its own, top-right, and may **not** join `#bottom-bar`: that row is
+    one grid whose two side reserves were measured in a browser, so a fourth box there would change
+    what the centre caption may spend with nothing on screen saying so. Its gradient is built from
+    `RAMP_STOPS`, never respelled in CSS.
 - **Text is not part of the glow.** Labels live in a separate `overlayScene`, drawn after
   the composer with `autoClear = false`. Every glyph pixel clears the bloom's 0.05
   threshold, so a label left in the main scene gets an additive halo that closes the
@@ -996,12 +1127,12 @@ measured on this host's small trees, not an observation, and `MAX_MARKS_PER_DOC`
 rather than an observed frame budget.
 
 Three findings from that plan are **noted and not built**, each with its trigger written down in
-`docs/features/todo/content-search.md`: R11, that every command refusal is reported as a
-`rootError` and painted in the observed-root bar — pre-existing, and a refused `search` is now a
-fourth silent case of it; R12, that results are not re-grepped as the tree changes under them (the
-name search has `refreshMatches` for exactly this, and a content search cannot re-read the disk on
-every event); and R14, that one client's search blocks that client's other commands for its
-duration.
+`docs/features/done/2026-08-23-02-51-content-search.md`: R11, that every command refusal is
+reported as a `rootError` and painted in the observed-root bar — pre-existing, and a refused
+`search` is now a fourth silent case of it; R12, that results are not re-grepped as the tree
+changes under them (the name search has `refreshMatches` for exactly this, and a content search
+cannot re-read the disk on every event); and R14, that one client's search blocks that client's
+other commands for its duration.
 
 **Not yet verified, for the ignore rules.** The suite is green and every decision is pinned, but
 the two real-tree fixtures only exercise the **governed** branch: this checkout has a root
@@ -1014,10 +1145,32 @@ Nothing in this feature has been seen in a browser: whether a project's `.claude
 arriving on the graph reads as the tree filling in or as noise is a judgement nobody has made on a
 real screen.
 
+**Not yet verified, for the size colour mode.** Both suites are green and every decision in it is
+pure and pinned, but nothing here has been seen on a screen — and this is the feature where that
+gap matters most, because the whole of it is a judgement about colour. Whether the ~2/255 neutral
+near the middle of the ramp reads as neutral rather than as a green, through the bloom and at the
+few pixels a dot actually occupies. Whether the median hinge makes a real project legible or merely
+puts everything mid-ramp. Whether directories at half brightness on their own scale are readable
+beside the files. Whether the top-right legend collides with anything at narrow widths, and whether
+a gradient strip is enough to match a dot against by eye. And whether R14 below reads as two facts
+or as a bug.
+
+Four findings from that plan are **noted and not built**, each with its trigger written down in
+`docs/features/done/2026-08-25-22-17-size-mode.md`: R10, that `fileColor` is still evaluated per
+node per frame in the *unarmed* case (774 µs per 1 500-node frame against 157 µs for the `Map.get`
+the armed path uses — measured in the plan, on this host, in Node 18 — so the mode is *faster than
+not using it*, which is an odd thing to have to explain); R11, that the measurement is a snapshot,
+so a file created while the mode is armed stays grey until F7 is pressed twice; R12, that a refused
+`sizes` is the fifth silent `rootError`; and R14, that file *labels* keep their extension colours
+while the mode is armed, because a label texture is rasterised once when its slot binds to a path
+and recolouring means re-canvassing up to 48 sprites inside one frame, twice per F7 — the dot beside
+the name already carries the size, and the label's job is to say *which* file.
+
 Not yet built: per-repository grouping in the panel (R5 in
-`docs/features/todo/multi-repo-git-status.md` — the `repo` field exists on `StatusEntry` and is
-deliberately *not* serialized, which is what keeps the frame's pinned shape untouched), custom
-avatar *images* per agent, recorded-session replay/export. Attribution of *watcher* events is time-based, so simultaneous agents can be
-credited to one of them — hook events themselves are attributed exactly. Label textures are
-rasterised once at the pixel ratio the renderer had at construction, so dragging the window
-to a monitor of a different DPI leaves the names slightly soft until a reload.
+`docs/features/done/2026-08-17-16-21-multi-repo-git-status.md` — the `repo` field exists on
+`StatusEntry` and is deliberately *not* serialized, which is what keeps the frame's pinned shape
+untouched), custom avatar *images* per agent, recorded-session replay/export. Attribution of
+*watcher* events is time-based, so simultaneous agents can be credited to one of them — hook
+events themselves are attributed exactly. Label textures are rasterised once at the pixel ratio
+the renderer had at construction, so dragging the window to a monitor of a different DPI leaves
+the names slightly soft until a reload.

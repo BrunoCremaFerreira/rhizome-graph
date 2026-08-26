@@ -1,7 +1,18 @@
-# Content search (ctrl+shift+F) -- assessment and staged plan
+# Plan: Content search (ctrl+shift+F) -- assessment and staged plan
 
-**Status:** not started. Written 2026-08-22 against `b3ae29b`, with both suites green at the
-numbers in section 0. Every line number below is from that commit.
+- **Status:** done -- R1-R10 and R13 implemented; R11, R12 and R14 noted and not built, each
+  with its trigger in section 3
+- **Created:** 2026-08-23 02:51 (the commit that recorded it; the text below was written on
+  2026-08-22)
+- **Implemented:** 2026-08-23 (branch `development`, fast-forwarded into `main`)
+- **PR/commit:** `fc6e182`, the same commit that recorded this plan; `812d9c9` for the
+  `CLAUDE.md` write-up
+- **Consultations (mandatory):** `software-architect` (2026-08-22) -- this document is its
+  assessment and staged plan, and it names the owner of every RED/GREEN step below.
+  `security-auditor` is referred to three times inside the plan; it was not consulted.
+
+Written 2026-08-22 against `b3ae29b`, with both suites green at the numbers in section 0. Every
+line number below is from that commit.
 
 Scope: a second search that matches a literal, case-insensitive string against the **contents**
 of every file the graph draws, lights the matching nodes with the same renderer channel the name
@@ -205,7 +216,7 @@ they are open. Decisions 4-14 are mine; say so if you would have chosen otherwis
     was wanted.
 12. **`parse_command` returns `kind`, `path` and `token` always; any fourth key appears only when
     the frame carried it in a form this daemon understands.** This is the R5 rule of
-    `multi-repo-git-status.md` (the conditional `repo` key) applied to the command side, and it
+    `2026-08-17-16-21-multi-repo-git-status.md` (the conditional `repo` key) applied to the command side, and it
     is what keeps the five pinned exact-equality assertions byte-identical. A `search` command
     parses with `path: ""` -- the gates echo `command["path"]` and must not learn a new shape.
 13. **Walking opens the file, inverting `searchKeys.ts`'s own rule -- on purpose.** That module's

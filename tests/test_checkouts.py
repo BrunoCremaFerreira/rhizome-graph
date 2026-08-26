@@ -31,7 +31,7 @@ change is most likely to break:
   * **Never raises, ever.** The caller is a background poll on the daemon's
     loop. An unreadable directory must cost results, never an exception.
 
-On what "depth" counts. The table in `docs/features/todo/multi-repo-git-status.md`
+On what "depth" counts. The table in `docs/features/done/2026-08-17-16-21-multi-repo-git-status.md`
 justifies `MAX_DEPTH = 3` as "covers `~/projects/a` and `~/src/github.com/org/repo`",
 so depth is counted here in **segments of the returned prefix**: `github.com/org/repo`
 is three and must be found, `a/b/c/d` is four and must not. That reading is the

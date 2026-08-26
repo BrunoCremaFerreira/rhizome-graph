@@ -1,7 +1,7 @@
 /**
  * Contract tests (RED) for marking the search matches inside the panel's text.
  *
- * The defect (R7 of `docs/features/todo/content-search.md`): the content search
+ * The defect (R7 of `docs/features/done/2026-08-23-02-51-content-search.md`): the content search
  * can tell the user a file holds nine occurrences and then open it with none of
  * them visible. A row is painted either as one text node or as a run of spans,
  * one per `CodeToken`, and a match crosses those tokens arbitrarily — half a

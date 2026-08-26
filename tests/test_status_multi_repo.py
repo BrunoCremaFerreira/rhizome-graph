@@ -9,7 +9,7 @@ reads exactly like a clean tree, which is the one thing it must never be confuse
 with. Everything after the early return -- the fork, the parse, the relativize --
 is reachable only in the single-repo case.
 
-This file is R2 of `docs/features/todo/multi-repo-git-status.md`. It is a **new
+This file is R2 of `docs/features/done/2026-08-17-16-21-multi-repo-git-status.md`. It is a **new
 file, deliberately**: `tests/test_status.py`'s 62 assertions stay byte-identical,
 so a reviewer can see that nothing about today's single-repo behaviour moved.
 

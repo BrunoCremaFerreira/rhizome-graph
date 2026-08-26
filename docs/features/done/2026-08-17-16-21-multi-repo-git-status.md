@@ -1,8 +1,19 @@
-# Multi-repository git status — assessment and staged plan
+# Plan: Multi-repository git status — assessment and staged plan
 
-**Status:** R1-R4 implemented 2026-08-22 against `9612548`; suites green at 1177 pytest, 990
-vitest (from 1088 / 990). R5 and R6 are not started and R7 is still a note. The decisions in
-section 2 were all confirmed as written.
+- **Status:** done — R1-R4 implemented; R5 and R6 not built and R7 still a note, each with its
+  rank and trigger in section 3
+- **Created:** 2026-08-17 16:21
+- **Implemented:** 2026-08-22, against `9612548` (branch `development`, fast-forwarded into
+  `main`)
+- **PR/commit:** `2207cfa`, `3664ced`, `d194113`, `dc3a2a1`; `aec545c` for this document and
+  `CLAUDE.md`
+- **Consultations (mandatory):** `software-architect` (2026-08-17) — this document is its
+  assessment and staged plan, and it names the owner of every RED/GREEN step below.
+  `security-auditor` is referred to for the finding about deriving a `cwd` before
+  `resolve_inside` has answered; it was not consulted.
+
+Both suites were green at 1177 pytest and 990 vitest (from 1088 / 990) when R1-R4 landed, and
+the decisions in section 2 were all confirmed as written.
 
 Written 2026-08-17 against `40b03f3`. The measurements in section 0 and the line numbers
 throughout are from that commit, so they have drifted: `status.py` in particular grew the

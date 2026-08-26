@@ -1,7 +1,17 @@
-# Dotted names on the graph, `.gitignore` as the filter -- assessment and staged plan
+# Plan: Dotted names on the graph, `.gitignore` as the filter -- assessment and staged plan
 
-**Status:** not started. Written 2026-08-26 against `dcf103a`, with the suites at the numbers in
-section 0. Every line number below is from that commit.
+- **Status:** done -- G1-G7 implemented; G8, G9 and G10 noted and not built, each with its
+  trigger in section 3
+- **Created:** 2026-08-26 18:43
+- **Implemented:** 2026-08-26 (branch `development`, fast-forwarded into `main`)
+- **PR/commit:** `db23a79`, the same commit that recorded this plan
+- **Consultations (mandatory):** `software-architect` (2026-08-26) -- this document is its
+  assessment and staged plan, and it names the owner of every RED/GREEN step below.
+  `security-auditor` is referred to five times inside the plan, the residual ReDoS question
+  among them; it was not consulted.
+
+Written 2026-08-26 against `dcf103a`, with the suites at the numbers in section 0. Every line
+number below is from that commit.
 
 Scope: the graph draws the directories and files whose names begin with `.`, and what stays off
 the graph is what a project's `.gitignore` says stays off. One new backend module, one predicate
@@ -507,7 +517,7 @@ because everything a `.gitignore` would have hidden here (`.venv/`, `.npm-bootst
 
 **Why it costs.** It is the feature. And the same walk feeds the content search
 (`content_search.py:195`) and the F7 size pass (`sizes.py:108`), so a file the graph will not draw
-is also a file `ctrl+shift+F` will not find -- which is the failure `content-search.md` decision 8
+is also a file `ctrl+shift+F` will not find -- which is the failure `2026-08-23-02-51-content-search.md` decision 8
 went out of its way to prevent in the other direction.
 
 **Target shape.** `_scan` builds one `IgnoreRules(root)` and prunes with the composite rule:
@@ -841,7 +851,7 @@ it; see section 7.
   out to need a `Session` change, decision 5 was wrong and the plan should be re-read before it is
   patched.
 - **Not settled: whether a `.gitignore` should be read through `safe_read.read_capped`.** The
-  argument for it is the one `content-search.md` R1 makes -- `scan_tree` filters symlinks but not
+  argument for it is the one `2026-08-23-02-51-content-search.md` R1 makes -- `scan_tree` filters symlinks but not
   FIFOs, and a named pipe called `.gitignore` under a hostile root would park a walk thread
   permanently. The argument against is that the walk opens this path for every root, on boot, and
   `read_capped` is measurably heavier than `open`. I did not measure it and I did not decide it;
