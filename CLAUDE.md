@@ -46,6 +46,16 @@ Each Gource "user" (the on-screen actor/avatar) represents **one agent**.
    forbidden text in a file it scans, describe it. The `tests/` trees are exempt only because
    encoding tests need real non-ASCII fixtures, never as licence for prose in another
    language. Talking to the user in Portuguese is fine — writing it into a file is not.
+5. **Release numbers are always `YY.MM.NNN`.** `YY` is the year the release was cut, `MM`
+   the month it was cut, and `NNN` a sequential counter of releases within that month,
+   zero-padded to three digits. `NNN` restarts at `001` when the month turns — it is a
+   per-month counter, never a running total. A bugfix release of an existing release is
+   `YY.MM.NNN-BB`, where `BB` is the sequential bugfix number of that exact `YY.MM.NNN` and
+   nothing else: `26.08.003-01` is the first bugfix of `26.08.003`, and its own second bugfix
+   is `26.08.003-02` no matter how many other releases were cut in between. The date in the
+   number is the date of the *release being cut*, so a bugfix keeps the base release's `YY.MM`
+   even when it ships in a later month. This is the only release-number format — tags,
+   package versions, changelog headings and anything a human reads all spell it the same way.
 
 ## Architecture
 
