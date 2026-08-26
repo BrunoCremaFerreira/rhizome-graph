@@ -28,8 +28,12 @@ class RhizomeGraph < Formula
 
   desc "Real-time visualizer of what each Claude Code agent is doing"
   homepage "https://github.com/BrunoCremaFerreira/rhizome-graph"
-  url "https://github.com/BrunoCremaFerreira/rhizome-graph/releases/download/v0.0.0/rhizome_graph-0.0.0.tar.gz"
-  version "0.0.0"
+  url "https://github.com/BrunoCremaFerreira/rhizome-graph/releases/download/v26.08.001/rhizome_graph-26.8.1.tar.gz"
+  # The tag carries the release number as CLAUDE.md spells it; the ASSET
+  # cannot, because PEP 440 strips the zero padding and `python -m build`
+  # names its sdist from the normalized version. Hence v26.08.001 above and
+  # 26.8.1 in the file name, with `version` restating the one a human reads.
+  version "26.08.001"
   # A placeholder, deliberately obvious. There is no release yet, so no real
   # digest exists; zeros make `brew install` fail loudly on the mismatch, where
   # a plausible-looking wrong digest would read as done and never be revisited.

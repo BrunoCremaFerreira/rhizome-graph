@@ -1,3 +1,20 @@
+rhizome-graph (26.08.001) unstable; urgency=medium
+
+  * First numbered release, under the scheme CLAUDE.md now mandates: YY.MM.NNN,
+    where NNN counts releases within the month and restarts at 001 when the
+    month turns.
+  * The version is NATIVE -- no Debian revision. A revision would be spelled
+    `26.08.001-1`, and under the same scheme `-BB` already means the sequential
+    bugfix of that exact release, so a packaging revision would read as a
+    bugfix release that was never cut. Native versions cost nothing here: this
+    package is built by packaging/build-deb.sh from this tree alone, and there
+    is no separate upstream tarball for a revision to distinguish it from.
+  * Note pyproject.toml declares the same number, but PEP 440 normalizes the
+    padding away: `pip` and `rhi --version` report 26.8.1 for the release this
+    changelog calls 26.08.001. The .deb, the tag and this file are exact.
+
+ -- rhizome-graph contributors <brn.qi.home@gmail.com>  Tue, 25 Aug 2026 23:30:00 -0300
+
 rhizome-graph (0.0.0-1) unstable; urgency=medium
 
   * Initial packaging. The version is the one pyproject.toml declares, plus a

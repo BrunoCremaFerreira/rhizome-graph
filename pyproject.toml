@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rhizome-graph"
-version = "0.0.0"
+version = "26.08.001"
 description = "Adapter that turns Claude Code hook events into a Gource-style event stream."
 requires-python = ">=3.10"
 dependencies = []
