@@ -90,6 +90,7 @@ from rhizome_graph.normalize import (
 )
 from rhizome_graph.paths import complete_dir, resolve_root
 from rhizome_graph.repo import display_root, read_branch
+from rhizome_graph.sizes import measure_sizes, sizes_frame
 from rhizome_graph.status import git_status, status_frame
 from rhizome_graph.token import inject_token, mint_token, token_matches
 from rhizome_graph.tree import scan_tree
@@ -456,7 +457,7 @@ def _encode(event: Event) -> str:
 
 #: The only kinds a client may send. Anything else is a browser from another
 #: version talking to this daemon, not an instruction.
-COMMAND_KINDS = ("complete", "setRoot", "file", "search")
+COMMAND_KINDS = ("complete", "setRoot", "file", "search", "sizes")
 
 
 def parse_command(raw: str) -> dict | None:
@@ -469,12 +470,18 @@ def parse_command(raw: str) -> dict | None:
 
     **Which field is required depends on the kind.** ``complete``, ``setRoot``
     and ``file`` each name a ``path`` and are refused without a string one;
-    ``search`` names a ``query`` instead and is refused without a string one.
+    ``search`` names a ``query`` instead and is refused without a string one; and
+    ``sizes`` names **nothing at all** -- "how big is everything you are
+    drawing?" has no argument, so there is no field it can be refused for.
     Reusing ``path`` for the query would be a lie: both gates below echo
     ``command["path"]`` back in their refusal, so a query smuggled through it
-    would be quoted at the user as the path that was refused. A ``search``
-    therefore parses with ``path: ""`` -- the echo field is still there, and it
-    holds the only path a search has.
+    would be quoted at the user as the path that was refused. A ``search`` and a
+    ``sizes`` therefore parse with ``path: ""`` -- the echo field is still there,
+    holding the only path either of them has. That makes ``sizes`` the one
+    command in this protocol that turns no string from the network into
+    anything, which is the whole of its security story: there is no containment
+    check to add because there is nothing to contain, and a field it would never
+    use is ignored rather than fatal.
 
     The parsed mapping always carries ``kind``, ``path`` and ``token``; a fourth
     key appears **only** when the frame carried it in a form this daemon
@@ -525,6 +532,12 @@ def parse_command(raw: str) -> dict | None:
         if not isinstance(query, str):
             return None
         command["query"] = query
+        return command
+    if kind == "sizes":
+        # The one command that names nothing: no path to contain and no query to
+        # fold, so the three keys already built are the whole of it. Returning
+        # here rather than falling to the path check is what makes a stray key
+        # from an older page cost nothing instead of the whole mode.
         return command
     path = payload.get("path")
     if not isinstance(path, str):
@@ -754,9 +767,9 @@ class Session:
         commands and actively wrong the moment a third existed: a ``file`` would
         have fallen through and swapped the observed project for a refusal about
         a path that is not a directory. Every kind therefore returns from its own
-        branch, and a ``search`` -- which carries the empty path, a string
-        :func:`resolve_root` would happily turn into somewhere -- must never
-        reach the ``setRoot`` tail.
+        branch, and a ``search`` or a ``sizes`` -- each carrying the empty path, a
+        string :func:`resolve_root` would happily turn into somewhere -- must
+        never reach the ``setRoot`` tail.
 
         The search re-reads ``self.root`` after its await, the way
         :meth:`publish_status` does, with one deliberate difference: status
@@ -765,7 +778,11 @@ class Session:
         are clickable and ``resolve_inside`` refuses every one of them under the
         new root -- but a dropped reply leaves the browser's ``pending`` flag set
         forever with no second reply coming, and status has a second publisher
-        where a search has none.
+        where a search has none. The measurement follows the search here rather
+        than status, and needs the re-read more: a ``sizes`` answer carries no
+        echo field a late one could be recognized by, so the daemon's own root
+        comparison is what makes an adopted frame necessarily about the project
+        on screen.
         """
         path = command["path"]
         kind = command["kind"]
@@ -789,6 +806,13 @@ class Session:
                 frame = search_frame(
                     command["query"], [], False, "the observed project changed"
                 )
+            await _send(websocket, frame)
+            return
+        if kind == "sizes":
+            asked_about = self.root
+            frame = await measure_sizes(asked_about)
+            if self.root != asked_about:
+                frame = sizes_frame([], False, "the observed project changed")
             await _send(websocket, frame)
             return
         if kind != "setRoot":
