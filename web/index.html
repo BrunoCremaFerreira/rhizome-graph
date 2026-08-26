@@ -24,7 +24,7 @@
           rhizome-graph · Gource-style live view
           <span class="keys">
             scroll: zoom · drag: pan · double-click: auto-fit · click: open file · ctrl+F: search ·
-            ctrl+shift+F: search in files · F3: next · ctrl+L: root
+            ctrl+shift+F: search in files · F3: next · F7: size colours · ctrl+L: root
           </span>
         </div>
       </div>
@@ -76,6 +76,14 @@
       <div id="root-matches" hidden></div>
       <div id="root-error" hidden></div>
     </div>
+    <!--
+      The size legend (F7), top-right and an element of its own. It may NOT join
+      #bottom-bar: that row is one grid whose two side reserves were measured in
+      a browser, so a fourth box there would change what the centre caption may
+      spend with nothing on screen saying so. Empty here and filled by
+      sizeHud.ts, which shows it only while the mode is armed.
+    -->
+    <div id="size-legend" hidden></div>
     <div id="file-view" hidden>
       <div id="file-view-backdrop"></div>
       <div id="file-view-panel">

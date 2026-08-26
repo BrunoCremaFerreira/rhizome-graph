@@ -13,6 +13,7 @@ import {
   parseReset,
   parseRootError,
   parseSearchResult,
+  parseSizes,
   parseStatus,
   type AgentEvent,
   type DaemonMeta,
@@ -22,6 +23,7 @@ import {
   type RootError,
   type RootReset,
   type SearchResult,
+  type SizesResult,
 } from "./protocol";
 import { readToken, withToken } from "./token";
 
@@ -33,6 +35,7 @@ export type RootErrorSink = (error: RootError) => void;
 export type FileViewSink = (view: FileView) => void;
 export type StatusSink = (status: GitStatus) => void;
 export type SearchResultSink = (result: SearchResult) => void;
+export type SizesSink = (sizes: SizesResult) => void;
 
 export interface WsClientOptions {
   /** Backoff floor / ceiling in ms. */
@@ -68,6 +71,13 @@ export interface WsClientOptions {
    * and grow a node named after an answer to a search.
    */
   readonly onSearchResult?: SearchResultSink;
+  /**
+   * The daemon's answer to "how big is everything?". Optional and consumed
+   * either way, for the same reason as the frames above: `parseEvent` ignores
+   * `kind`, so a page built before this frame existed would otherwise let it
+   * fall through and grow a node called "sizes" in the graph.
+   */
+  readonly onSizes?: SizesSink;
 }
 
 /** Used only outside a browser (tests, SSR); real pages derive from location. */
@@ -119,6 +129,7 @@ export class WsClient {
   private readonly onFileView: FileViewSink | undefined;
   private readonly onStatus: StatusSink | undefined;
   private readonly onSearchResult: SearchResultSink | undefined;
+  private readonly onSizes: SizesSink | undefined;
 
   constructor(
     private readonly url: string,
@@ -134,6 +145,7 @@ export class WsClient {
     this.onFileView = options.onFileView;
     this.onStatus = options.onStatus;
     this.onSearchResult = options.onSearchResult;
+    this.onSizes = options.onSizes;
     this.delay = this.minDelay;
   }
 
@@ -246,6 +258,16 @@ export class WsClient {
     const searchResult = parseSearchResult(raw);
     if (searchResult) {
       this.onSearchResult?.(searchResult);
+      return;
+    }
+    // Before `parseEvent` as well, and consumed with or without a sink: a
+    // frame of sizes is an answer ABOUT files, not a change to any of them, so
+    // routing it on would grow a phantom node called "sizes" and put it back on
+    // every press. `parseEvent` ignores `kind`, so the ordering is the only
+    // thing keeping this answer out of the simulation.
+    const sizes = parseSizes(raw);
+    if (sizes) {
+      this.onSizes?.(sizes);
       return;
     }
     const event = parseEvent(raw);

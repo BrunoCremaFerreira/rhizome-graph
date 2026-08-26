@@ -294,6 +294,87 @@ body {
 }
 
 /*
+ * The size legend (F7), top right — the only thing that gives the size ramp a
+ * meaning. The scale is root-relative and hinged at the median, so a bar with
+ * no numbers under it says nothing: each row prints its p10, its median and its
+ * p90, and there are two rows because files and directories are ranked on
+ * separate distributions.
+ *
+ * Top right rather than in #bottom-bar, whose three-track grid reserves a
+ * measured width on each side of the centred root caption; a fourth box there
+ * would change that arithmetic silently. It overlaps the two search bars
+ * (centred at the same top) only at very narrow widths, and the docked file
+ * panel simply paints over it — the same bargain #status already accepts, since
+ * closing the panel undoes it.
+ *
+ * `pointer-events: none` because nothing here is clicked: the legend must never
+ * eat a drag or a click meant for the canvas underneath.
+ */
+#size-legend {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #2a2e34;
+  border-radius: 6px;
+  background: rgba(12, 13, 15, 0.82);
+  color: #8a8f98;
+  font: 12px/1.4 system-ui, sans-serif;
+  pointer-events: none;
+  user-select: none;
+}
+
+/*
+ * The `display: flex` above would otherwise override the `hidden` attribute and
+ * leave the legend on screen once the mode is closed — the same trap as
+ * #context-branch, #search, #root-bar and #file-view.
+ */
+#size-legend[hidden] {
+  display: none;
+}
+
+#size-legend .row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  /* Wide enough for three byte counts in three different units, and no wider. */
+  width: 190px;
+}
+
+#size-legend .label {
+  color: #5c6067;
+}
+
+#size-legend .ramp {
+  height: 6px;
+  border-radius: 3px;
+}
+
+/* Cold at the left end, the median in the middle, hot at the right — the order
+ * the ramp above runs in. */
+#size-legend .stops {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  color: #d5d9df;
+  white-space: nowrap;
+}
+
+#size-legend .note {
+  max-width: 190px;
+  color: #5c6067;
+}
+
+/* A walk that failed replaces the rows, so this line is alone in the box. */
+#size-legend .error {
+  max-width: 190px;
+  color: #ff8a7a;
+}
+
+/*
  * Observed-root bar (ctrl+L), top centre — the address bar for the project
  * being watched. Same skin as #search, and `pointer-events: auto` is required
  * for the same reason: it is typed into.

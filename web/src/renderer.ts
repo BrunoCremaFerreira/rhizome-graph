@@ -38,7 +38,8 @@ import type { AgentEvent } from "./protocol";
 import type { SimNode, Simulation } from "./simulation";
 import { ForceLayout } from "./layout";
 import { createAvatarCanvas } from "./avatar";
-import { fileColor, hashColor, hexToInt } from "./colors";
+import { NEUTRAL_NODE_COLOR, fileColor, hashColor, hexToInt } from "./colors";
+import { UNMEASURED_COLOR } from "./sizeColor";
 import {
   allocateEdgeAttributes,
   allocateNodeAttributes,
@@ -137,7 +138,8 @@ interface ReadCandidate {
 
 const MAX_BEAMS = 512;
 const BEAM_LIFE_SECONDS = 1.2;
-const DIR_COLOR = 0x9aa0a6;
+/** The neutral grey a directory dot wears, shared with the size mode's unmeasured nodes. */
+const DIR_COLOR = NEUTRAL_NODE_COLOR;
 
 /**
  * Colour of a file being read, the violet the daemon puts on the wire (AA66FF).
@@ -347,6 +349,14 @@ export class GourceRenderer {
    * {@link setOccludedRight}.
    */
   private occludedRight = 0;
+  /**
+   * Path -> packed `0xRRGGBB` while the size mode is armed, null while it is not.
+   *
+   * A MAP OF ANSWERS, like `setSearch`'s list of paths: nothing here learns what
+   * a byte is, what a median is, or which key armed the mode. Every percentile
+   * and every ramp evaluation happened once, when the measurement was adopted.
+   */
+  private sizeColors: ReadonlyMap<string, number> | null = null;
   /** The active match's ring, in the MAIN scene: unlike text, it should glow. */
   private readonly searchMarker: Sprite;
   /** Scratch for the camera frame; refilled in place, never reallocated. */
@@ -647,6 +657,19 @@ export class GourceRenderer {
     this.occludedRight = fraction;
   }
 
+  /**
+   * The colour every node wears while the size mode is armed, or null when it
+   * is off.
+   *
+   * Colours, never sizes: handed one measurement per node, this loop would have
+   * to evaluate a scale and a five-stop ramp 1 500 times a frame to recompute a
+   * value that only changes when an answer arrives. The per-frame cost of the
+   * mode is therefore one `Map.get`.
+   */
+  setSizeColors(colors: ReadonlyMap<string, number> | null): void {
+    this.sizeColors = colors;
+  }
+
   /** Register a discrete event for its visual effect (actor beam + flash). */
   onEvent(event: AgentEvent): void {
     // Seeded tree entries and unattributed filesystem changes have no actor, so
@@ -886,10 +909,21 @@ export class GourceRenderer {
         this.scratchColor.setHex(SEARCH_COLOR);
         sizeArr[idx] = (base + boost) * pulse * dpr;
       } else if (node.kind === "dir") {
-        this.scratchColor.setHex(DIR_COLOR).multiplyScalar(0.5);
+        // Below the matched branch on purpose: a match and the open file stay
+        // cyan while the mode is armed, which is how the search keeps working.
+        // An armed mode with no answer for this directory paints the grey it
+        // already wore, rather than a second near-grey nothing could tell apart.
+        const base =
+          this.sizeColors?.get(node.path) ?? (this.sizeColors ? UNMEASURED_COLOR : DIR_COLOR);
+        this.scratchColor.setHex(base).multiplyScalar(0.5);
         sizeArr[idx] = 3.5 * dpr;
       } else {
-        const base = fileColor(node.path);
+        // The size colour replaces the BASE colour and nothing else: the write
+        // flash, the read tint, the idle fade and the point size below all still
+        // apply on top, so a file being written still flashes amber over it.
+        const base = this.sizeColors
+          ? (this.sizeColors.get(node.path) ?? UNMEASURED_COLOR)
+          : fileColor(node.path);
         const flash = hexToInt(node.color) ?? base;
         this.scratchColor.setHex(base).lerp(tmpColor.setHex(flash), node.highlight);
         // The read is blended AFTER the write's flash and on its own channel, so

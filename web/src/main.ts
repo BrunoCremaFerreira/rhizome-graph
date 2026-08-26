@@ -58,6 +58,18 @@ import {
   totalMatches,
   type ContentSearchState,
 } from "./contentSearch";
+import { interpretSizeKey } from "./sizeKeys";
+import {
+  applySizes,
+  closeSizeMode,
+  createSizeMode,
+  shouldRequest,
+  sizeColors,
+  sizeLegend,
+  toggleSizeMode,
+  type SizeModeState,
+} from "./sizeMode";
+import { createSizeHud } from "./sizeHud";
 import {
   activePath,
   closeSearch,
@@ -124,6 +136,8 @@ function boot(): void {
   const fileViewHud = fileViewEl ? createFileViewHud(fileViewEl) : null;
   const statusEl = document.getElementById("status");
   const statusHud = statusEl ? createStatusHud(statusEl, openFile) : null;
+  const sizeLegendEl = document.getElementById("size-legend");
+  const sizeHud = sizeLegendEl ? createSizeHud(sizeLegendEl) : null;
 
   // The search's whole state machine is in `search.ts`; this is just the one
   // variable holding the state it returns, and the wiring that shows it.
@@ -247,6 +261,21 @@ function boot(): void {
       .catch(() => {});
   }
 
+  // And the same shape for the size mode: `sizeMode.ts` owns the phases, the two
+  // scales and every ramp evaluation; this is the variable holding what it
+  // returned plus the one channel that paints it. `sizeColors` answers null
+  // unless the mode is armed, which is how the renderer is told the mode is off
+  // without learning that a mode exists.
+  let sizeMode: SizeModeState = createSizeMode();
+
+  function showSizeMode(next: SizeModeState): void {
+    sizeMode = next;
+    renderer.setSizeColors(sizeColors(sizeMode));
+    // The same one value drives both: `sizeLegend` answers null exactly when
+    // `sizeColors` does, so the strip cannot outlive the colours it explains.
+    sizeHud?.render(sizeLegend(sizeMode));
+  }
+
   const client = createWsClient(
     (event) => {
       sim.applyEvent(event);
@@ -282,6 +311,11 @@ function boot(): void {
       // have been closed, or the query typed over and resubmitted, while it
       // travelled — so nothing here inspects it.
       onSearchResult: (result) => showContentSearch(applyContentResults(contentSearch, result)),
+      // The walk came back. `applySizes` decides whether this answer is still
+      // the one being waited for -- the mode may have been toggled off, or a
+      // reset may have closed it, while it travelled -- and it is also where the
+      // directories are summed and both scales are built, once per answer.
+      onSizes: (frame) => showSizeMode(applySizes(sizeMode, frame)),
       // What is uncommitted right now. The frame is deduped by the daemon, so
       // this only fires when the working tree really changed.
       onStatus: (status) => statusHud?.render(status),
@@ -302,6 +336,11 @@ function boot(): void {
         // request that may still be in flight — the state it lands on is no
         // longer pending, so `applyContentResults` refuses it.
         showContentSearch(closeContentSearch(contentSearch));
+        // The map is keyed by paths of the old project, so every colour on
+        // screen would be about a file the new tree does not have. Closing also
+        // settles a walk that may still be in flight, by the same rule: the
+        // state it lands on is no longer pending, so `applySizes` refuses it.
+        showSizeMode(closeSizeMode(sizeMode));
         attribution.reset();
         attributionHud?.update(false, false);
         // Only now does the bar close: the switch is confirmed, not merely sent.
@@ -321,6 +360,23 @@ function boot(): void {
   rootHud?.onTextChange((text) => showRoot(setText(rootPrompt, text)));
 
   window.addEventListener("keydown", (event) => {
+    // F7 sits above the chain below and takes no part in its precedence
+    // argument: that argument is about keys two bindings both want, and this
+    // one is contested by nothing and conditional on nothing. The mode has to
+    // toggle with a modal open, with the root bar focused and with either
+    // search bar taking keystrokes. `interpretSizeKey` declines everything that
+    // is not a bare, non-repeating F7, and the test that pins that is what
+    // keeps this position defensible.
+    if (interpretSizeKey(event)) {
+      event.preventDefault(); // Firefox binds F7 to caret browsing.
+      const next = toggleSizeMode(sizeMode);
+      // Only the closed -> pending crossing owes the daemon a walk, so a held
+      // key and a toggle back off both send nothing.
+      if (shouldRequest(sizeMode, next)) client.send({ kind: "sizes" });
+      showSizeMode(next);
+      return;
+    }
+
     // The modal goes before everything: while a panel covers the graph, Escape
     // is the panel's, not the search box's and not the root bar's. The binding
     // declines every key while the panel is closed, so nothing below it loses

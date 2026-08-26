@@ -39,6 +39,18 @@ const EXTENSION_COLORS: Readonly<Record<string, number>> = {
   lock: 0x999999,
 };
 
+/**
+ * The grey a node wears when it carries no information of its own: a directory
+ * in the normal mode, and an unmeasured node while the size mode is armed.
+ *
+ * It lives here, in the one pure module both callers can import, because the
+ * renderer's `DIR_COLOR` and `sizeColor.ts`'s `UNMEASURED_COLOR` must be the
+ * SAME grey. Two near-greys side by side is the least legible pair this page
+ * could contain, and two constants that happen to be equal is the drift waiting
+ * to happen: a retune has to move one literal, not find both.
+ */
+export const NEUTRAL_NODE_COLOR = 0x9aa0a6;
+
 /** Parse `#RRGGBB`/`RRGGBB` hex (no `#`) into 0xRRGGBB, or `null` if malformed. */
 export function hexToInt(hex: string): number | null {
   const clean = hex.startsWith("#") ? hex.slice(1) : hex;

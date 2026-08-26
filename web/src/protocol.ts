@@ -419,6 +419,87 @@ export function parseSearchResult(raw: unknown): SearchResult | null {
 }
 
 /**
+ * One file the daemon measured, and how many bytes it holds.
+ *
+ * `bytes` is a non-negative integer for the same reason {@link FileMatchCount}'s
+ * `count` is: it is fed to a logarithmic scale and a colour ramp, so half a byte
+ * has no meaning and a negative or non-finite one poisons the percentiles the
+ * whole ramp is hinged on — one bad entry would recolour every file in the tree.
+ */
+export interface FileSizeEntry {
+  /** Path relative to the observed root. */
+  path: string;
+  /** The file's size on disk, in bytes. */
+  bytes: number;
+}
+
+/**
+ * The daemon's answer to "how big is everything?", pushed on the event socket.
+ *
+ * The browser cannot stat the disk, so the size mode is a ROUND TRIP: the page
+ * asks and this frame comes back. Unlike {@link SearchResult} it echoes NOTHING
+ * — there is no query to supersede — which is why it has no hard field beyond
+ * its kind.
+ */
+export interface SizesResult {
+  /** The files it measured, in the order the daemon walked them. */
+  files: FileSizeEntry[];
+  /** Whether the daemon cut the walk short. */
+  truncated: boolean;
+  /** Why the daemon could not answer, or `""` when it could. */
+  error: string;
+}
+
+/**
+ * Validate and parse a raw WebSocket message into a {@link SizesResult}.
+ *
+ * Contract (see tests/sizeProtocol.test.ts):
+ *   - `kind` must be exactly `"sizes"`, load-bearing in both directions like
+ *     {@link parseSearchResult}'s: an answer routed as activity would grow a
+ *     node called "sizes" in the graph — once per press, permanently — and an
+ *     activity event mistaken for an answer would recolour the whole tree from
+ *     a single path.
+ *   - THERE IS NO HARD FIELD BEYOND `kind`, and that is the one deliberate
+ *     difference from {@link parseSearchResult}. That parser requires a string
+ *     `query` because the comparison IS its supersede guard; a `sizes` answer
+ *     echoes nothing, so nothing's absence should cost the frame. A frame with
+ *     an empty `files` is a real answer — an empty project — and dropping it
+ *     would leave the mode pending forever, with nothing left on screen to
+ *     explain why the key does nothing.
+ *   - `files` DEGRADES as `parseStatus`'s `entries` does: absent or mistyped
+ *     becomes `[]`, and a junk item is dropped ONE AT A TIME. An entry needs a
+ *     string `path` (a size naming no file colours nothing) and a `bytes`
+ *     validated by the EXISTING {@link isCount} — it already means exactly "a
+ *     non-negative integer", and a second predicate beside it would be a second
+ *     definition of the same rule, free to drift.
+ *   - `truncated` and `error` fall back to `false` and `""`. Dropping the frame
+ *     over them would wedge the mode on a reply that did arrive.
+ *   - Order is preserved; the scale and the ramp belong elsewhere.
+ *   - NEVER throws: this comes off the network.
+ */
+export function parseSizes(raw: unknown): SizesResult | null {
+  if (!isRecord(raw)) return null;
+  if (raw.kind !== "sizes") return null;
+
+  const files: FileSizeEntry[] = [];
+  if (Array.isArray(raw.files)) {
+    for (const item of raw.files) {
+      if (!isRecord(item)) continue;
+      const { path, bytes } = item;
+      if (typeof path !== "string") continue;
+      if (!isCount(bytes)) continue;
+      files.push({ path, bytes });
+    }
+  }
+
+  return {
+    files,
+    truncated: raw.truncated === true,
+    error: typeof raw.error === "string" ? raw.error : "",
+  };
+}
+
+/**
  * How git sees a path that is not committed yet.
  *
  * The four words this page knows how to draw. A newer daemon reporting a fifth
