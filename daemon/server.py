@@ -118,10 +118,14 @@ DEDUPE_WINDOW_SECONDS = 2.0
 COALESCE_WINDOW_SECONDS = 0.75
 
 #: How often the observed repository is re-read for the HUD's branch. Polling is
-#: the only way to see a checkout: the watcher filters paths through
-#: ``tree.is_ignored``, which drops every dotted directory segment, so `.git/HEAD`
-#: is invisible to it by design -- otherwise a single `git status` would flood the
-#: graph with index churn. One small file read every couple of seconds is free.
+#: the only way to see a checkout: `.git` is named in ``tree.ALWAYS_IGNORED_DIRS``
+#: and refused by ``tree.is_structural_noise`` before any pattern is consulted, so
+#: `.git/HEAD` is invisible to the watcher by design -- otherwise a single
+#: `git status` would flood the graph with index churn. That is a rule about the
+#: name and not about the leading dot: since the watcher learned to read a
+#: `.gitignore`, a governed `.claude/` reaches the graph while `.git/` still
+#: cannot, in this project and in every checkout of a workspace. One small file
+#: read every couple of seconds is free.
 REPO_POLL_INTERVAL_SECONDS = 2.0
 
 #: How often the working tree is re-read for the HUD's status panel. Slower than

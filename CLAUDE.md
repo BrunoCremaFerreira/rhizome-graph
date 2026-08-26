@@ -117,6 +117,7 @@ it causes.
 ```
 rhizome_graph/normalize.py  # pure: hook JSON → Event; also actor_of / seed_event / fs_event
 rhizome_graph/tree.py       # boot snapshot of the observed project
+rhizome_graph/gitignore.py  # git's ignore syntax, pure; IgnoreRules reads the files, per directory
 rhizome_graph/repo.py       # pure: reads .git/HEAD for the branch (never shells out to git)
 rhizome_graph/paths.py      # pure: resolve a typed root, and complete a directory like a shell
 rhizome_graph/token.py      # pure: the control token — mint, compare, and inject into the page
@@ -260,8 +261,8 @@ it should do.
 
 Web MVP implemented and verified end-to-end (TDD).
 
-- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1310/1310 pytest green (1330 with
-  `RHIZOME_PACKAGE_TESTS=1`, which opts into the slow builds — one wheel, one real `.deb`).
+- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1498 pytest green with 20 skipped (1518
+  with `RHIZOME_PACKAGE_TESTS=1`, which opts into the slow builds — one wheel, one real `.deb`).
   Hook is stdlib-only and exits 0 on garbage input. Daemon seeds the project tree at boot,
   ingests hook events on a Unix socket, watches the filesystem, and serves `web/dist` over
   HTTP **and** broadcasts events over WebSocket (`/ws`) on a single port (`:8080`) — one
@@ -597,6 +598,78 @@ Web MVP implemented and verified end-to-end (TDD).
   tolerated rather than fatal (the `python` stub in the older `start.sh` tests answers every
   call with silence, and prod does not need the variable at all) — it warns on stderr in
   `--dev`, where the cost is that every command is refused.
+- **A `.gitignore` decides what is drawn.** The graph could never show a project's committed
+  `.claude/` or `.github/`: `tree.py` pruned every dotted name unconditionally, and the one file
+  that actually says what is not worth drawing was never opened at all. `rhizome_graph/gitignore.py`
+  now compiles git's pattern syntax in pure Python — it forks nothing, because `git check-ignore`
+  costs a process on a walk that asks the question 20 000 times and again on the watcher's
+  per-event path, says nothing about a root that is not a repository or about a workspace of
+  checkouts, and `git` is Recommends rather than Depends in the `.deb`. Nine things are
+  load-bearing:
+  - **A `.gitignore` at or above a directory governs it; where none does, every dotted directory
+    is pruned.** The fallback is not a legacy leftover kept out of caution — dropping it takes
+    `$HOME` from 12 500 files to 20 000, which *is* `DEFAULT_MAX_FILES`: the seed silently
+    truncated and the graph no longer the tree. 13 044 of the files gained are `.vscode-server`,
+    `.cache`, `.local`, `.config` and `.npm`, which no `.gitignore` will ever name.
+  - **The presence of the file is the switch, not the rules it contributed.** An empty
+    `.gitignore` is the documented way to say "draw everything here", and deriving `governs` from
+    "did this file produce rules" would close that hatch without a word. And `governs` is asked
+    **per directory, never once per tree**: a workspace root answers `False` while each checkout
+    under it answers `True`, in one walk.
+  - **`.git` and generated output are hidden by name, whatever any pattern says.** Measured:
+    `git check-ignore .git/config` reports *not ignored* even with `!.git` in force, because git
+    never submits `.git` to the ignore machinery at all — so ours is a deliberate divergence, not
+    an imitation of git. Both rules live in the **caller**: `gitignore.py` answers git's question
+    and no rhizome policy, which is exactly what lets it be tested against real git rather than
+    against our taste.
+  - **Two entry points, one rule, and `tests/test_ignore_agreement.py` is the only thing binding
+    them.** `ignored_child` is the walk's — leaf only, because pruning `dirnames` in place *is*
+    git's rule that nothing under an excluded directory can be re-included. `ignored` is the
+    watcher's — the whole ancestor chain, paid for because one inotify path has no walk behind it.
+    They give **different answers on purpose**: with `out/` followed by `!out/keep.txt` the chain
+    stops at `out/` and the flat leaf test reaches the negation, so collapsing the two into one
+    call is the simplification to refuse. The binding property is therefore **one-way** — every
+    path the walk kept is not `ignored`, never the converse — because a pruned path falls into
+    three categories and only one of them is this module's: pruned by a *pattern* is `True`,
+    pruned *structurally* (`.git`, `node_modules`) is `False`, and pruned by the *dotted fallback*
+    is `False`. Two out of three is the story a reader invents alone.
+  - **In the watcher, `_refused_by_name` runs before `rules.ignored`,** and reading that line as
+    "`tree.is_ignored` first" ships the very bug this feature exists to fix: that predicate carries
+    the dotted fallback unconditionally, so a governed `.claude/agents/a.md` would be seeded at
+    boot, flash once, and never update again.
+  - **The refusals, each with its price.** No `.git/info/exclude` and no `core.excludesFile`, so a
+    user who keeps local-only or global ignores sees those files on the graph. No ignore file
+    *above* the observed root, so pointing the daemon at a subdirectory of a checkout leaves that
+    subtree governed by nothing and the fallback applies — which is today's behaviour, so nothing
+    regresses. No POSIX bracket classes: `re` reads one as an ordinary class of the letters inside
+    it and matches the wrong thing *silently*, which is worse than not matching, so a pattern
+    containing one is refused whole and its files are shown. Byte-exact case, so on a
+    case-insensitive filesystem a lower-case pattern misses a capitalised directory. The direction
+    of every failure is the same: a refused rule, an unreadable ignore file or a cap reached shows
+    **more**, never less, because showing more is what this feature is for.
+  - **Two `.gitignore` traps, both measured and neither obvious.** Reading a `.gitignore` is itself
+    watched — the daemon's own load emits `opened` and `closed_no_write` carrying that basename, so
+    invalidating on *any* event with that name throws away precisely the memoization those reads
+    exist to fill. And an atomic save moves `.gitignore.tmp` onto `.gitignore`, so only the move's
+    **destination** carries the name.
+  - **The cost is known, named, and two of the four figures miss the plan's own ceiling.**
+    `scan_tree` goes 3.2 ms → 6.8 ms on this checkout (ceiling ~6.5 ms), 13.5 ms → 52.9 ms on
+    `~/projects` (ceiling 40.3 ms) and 294.7 ms → 591.5 ms on `$HOME` (ceiling 461 ms); the
+    watcher's per-event path goes 2.90 µs → 30.29 µs (ceiling 12.43 µs). The excess is in one place
+    in each case and it is **not the caching failing**: `ignored` re-walks `ignored_child` once per
+    ancestor, which is quadratic in depth, and `ignored_child` re-splits the directory into
+    segments once per *entry* rather than once per directory. What it buys stays bounded — `$HOME`
+    still lands at 12 517 files, well under `DEFAULT_MAX_FILES`, so the seed does not truncate — and
+    the cost is paid off the event loop: all four `scan_tree` callers already run on a thread, and
+    the hook's hot path imports nothing from `tree` or `gitignore`.
+  - **Two prices are known and deliberately unpaid,** each noted with its trigger in
+    `docs/features/todo/gitignore-visibility.md`. A deliberately committed `dist/` stays invisible,
+    because the structural set overrules an explicit `.gitignore` (the alternative is a second
+    interaction between two rule systems, and the unbounded case is a repository whose
+    `.gitignore` omits `node_modules`). And a repository with no `.gitignore` at all keeps its
+    `.claude/` hidden, since the presence of the file is the switch — the answer to give first is
+    the empty file, not a trigger on `.git`, which on this repository alone would draw 1 114 files
+    of vendored Python.
 - **Frontend** (`web/`): 1287/1287 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
   3.23.0 — 4.x needs Node ≥ 20 and this machine has 18) is the first runtime dependency added
   since `d3-force`; note that `npm install` under npm 10 strips the `libc` fields from
@@ -930,11 +1003,21 @@ name search has `refreshMatches` for exactly this, and a content search cannot r
 every event); and R14, that one client's search blocks that client's other commands for its
 duration.
 
+**Not yet verified, for the ignore rules.** The suite is green and every decision is pinned, but
+the two real-tree fixtures only exercise the **governed** branch: this checkout has a root
+`.gitignore`, so `REPO_ROOT` never walks a subtree where the dotted fallback is the rule in force,
+and the ungoverned half rests on hand-built `tmp_path` trees alone. No hostile tree has been walked
+with rules in force either — a network mount, a symlink loop, a directory of 10 000 children — so
+`MAX_IGNORE_FILES` and the per-directory read cost stay pinned guesses rather than observed
+ceilings, and the `$HOME` and `~/projects` timings above are this host's, on this host's trees.
+Nothing in this feature has been seen in a browser: whether a project's `.claude/` and `.github/`
+arriving on the graph reads as the tree filling in or as noise is a judgement nobody has made on a
+real screen.
+
 Not yet built: per-repository grouping in the panel (R5 in
 `docs/features/todo/multi-repo-git-status.md` — the `repo` field exists on `StatusEntry` and is
 deliberately *not* serialized, which is what keeps the frame's pinned shape untouched), custom
-avatar *images* per agent, `.gitignore` parsing, recorded-session
-replay/export. Attribution of *watcher* events is time-based, so simultaneous agents can be
+avatar *images* per agent, recorded-session replay/export. Attribution of *watcher* events is time-based, so simultaneous agents can be
 credited to one of them — hook events themselves are attributed exactly. Label textures are
 rasterised once at the pixel ratio the renderer had at construction, so dragging the window
 to a monitor of a different DPI leaves the names slightly soft until a reload.

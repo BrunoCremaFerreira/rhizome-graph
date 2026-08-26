@@ -371,6 +371,25 @@ FORKING_NAMES = (
     "gitcmd",
 )
 
+#: Modules of ours that must never be named here, listed rather than merely left
+#: out of `FIRST_PARTY_IMPORTS_ALLOWED`, because the reason differs per entry and
+#: a bare absence records neither.
+#:
+#:   * `gitcmd` -- discovery forks nothing; the same reason `FORKING_NAMES` has.
+#:   * `gitignore` -- the pattern matcher belongs to the *graph's* walk, which is
+#:     about to consult a `.gitignore` (G4). Discovery must not follow it there.
+#:     This walk is called on every status round, uncached, because it is 50-100x
+#:     cheaper than the forks it decides on (0.2-0.4 ms against ~20 ms); routing a
+#:     matcher through it inverts that trade. And it answers a different question:
+#:     a checkout is worth finding whether or not somebody's `.gitignore` hides
+#:     the directory it sits in, while a rule matcher taught to look inside dotted
+#:     directories would spend `MAX_SCANNED_DIRS` on `.git/objects` and report
+#:     nothing.
+FORBIDDEN_FIRST_PARTY = (
+    "gitcmd",
+    "gitignore",
+)
+
 
 def _source() -> str:
     return Path(checkouts.__file__).read_text(encoding="utf-8")
@@ -463,4 +482,79 @@ def test_checkouts_never_starts_a_process():
         "nothing: the status poll calls it on every round precisely because it "
         "is 50-100x cheaper than the forks it decides on, and gitcmd stays the "
         "one place in this project where a process is started."
+    )
+
+
+# --- G3: discovery asks its own question, in its own words -----------------
+#
+# The defect: `_child_directories` reached through `tree`'s underscore for
+# `_is_ignored_dir`, a private predicate `tree._scan` and `tree.is_ignored` were
+# also using. Three call sites, two audiences, one name. G4 changes what the
+# *graph's* walk hides -- a `.gitignore` starts governing it and the blanket
+# dotted rule becomes a fallback -- and discovery must not move with it: it walks
+# every status round, uncached, on the strength of being 50-100x cheaper than the
+# forks it decides on, and a matcher that looks inside dotted directories would
+# burn `MAX_SCANNED_DIRS` on `.git/objects`.
+#
+# What discovery needs is narrower and stated here: skip structural noise (which
+# it borrows from `tree`, so a row it produces points at a part of the tree the
+# graph actually draws) and skip *every* dotted directory, because a working tree
+# is never inside one.
+
+
+def test_child_directories_skips_noise_and_every_dotted_directory(tmp_path: Path):
+    """Discovery's own rule, pinned at the call site rather than in `tree`.
+
+    `.cache` is the entry that matters: it is not structural noise -- G4 makes
+    the graph draw dotted directories a `.gitignore` does not hide -- and this
+    walk must go on skipping it regardless.
+    """
+    for name in (".git", ".cache", "node_modules", "src"):
+        (tmp_path / name).mkdir()
+
+    assert checkouts._child_directories(str(tmp_path)) == ["src"]
+
+
+def test_checkouts_does_not_reach_through_trees_underscore():
+    """`_is_ignored_dir` is gone, and discovery does not name a private predicate.
+
+    Asserted over identifiers, not over the raw text: the module's docstring is
+    expected to explain that the noise rule is `tree`'s, and a substring search
+    would fail on that explanation instead of on a breach of it.
+    """
+    used = _identifiers(ast.parse(_source()))
+
+    assert "_is_ignored_dir" not in used, (
+        "rhizome_graph/checkouts.py still names tree._is_ignored_dir. Discovery "
+        "and the graph's walk ask different questions; G4 changes the graph's, "
+        "and a shared private predicate is how that change leaks in here."
+    )
+
+
+def test_first_party_import_allow_list_is_exactly_repo_and_tree():
+    """The allow-list re-asserted, so widening it is a deliberate edit.
+
+    `imported <= FIRST_PARTY_IMPORTS_ALLOWED` is satisfied just as well by adding
+    `gitignore` to the set as by not importing it, and the second is the point.
+    """
+    assert FIRST_PARTY_IMPORTS_ALLOWED == {"repo", "tree"}
+
+
+def test_checkouts_never_names_the_gitignore_matcher():
+    """G4 does not leak into discovery -- the pin, with its reason above.
+
+    Caught over identifiers so `from rhizome_graph.gitignore import IgnoreRules`,
+    `from rhizome_graph import gitignore` and a late in-function import all read
+    the same.
+    """
+    used = _identifiers(ast.parse(_source()))
+
+    offenders = sorted(used & set(FORBIDDEN_FIRST_PARTY))
+
+    assert offenders == [], (
+        f"rhizome_graph/checkouts.py names {offenders}. Discovery is called on "
+        "every status round, uncached, because it is 50-100x cheaper than the "
+        "forks it decides on (0.2-0.4 ms against ~20 ms); a pattern matcher or a "
+        "`git` call inverts that trade, and a matcher taught to walk dotted "
+        "directories would spend MAX_SCANNED_DIRS inside .git/objects."
     )

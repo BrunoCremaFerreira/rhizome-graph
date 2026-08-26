@@ -6,8 +6,15 @@ gives up -- without forking anything -- the moment that climb comes back empty. 
 a workspace root holding five checkouts side by side shows no status panel at
 all: not "everything is clean", but silence, which reads exactly like a healthy
 repository with nothing pending. The one downward walk that already existed,
-`tree.scan_tree`, prunes every dotted directory in place, so it steps over a
-`.git` without ever seeing one.
+`tree.scan_tree`, is the graph's walk and answers the graph's question, so it
+steps over a `.git` without ever seeing one.
+
+**Discovery's rule is its own,** `_is_uninteresting`: the structural noise
+`tree.is_structural_noise` names, plus *every* dotted directory, permanently.
+A working tree is never inside a dotted directory, and this walk runs on every
+status round, uncached, on the strength of being 50-100x cheaper than the forks
+it decides on (0.2-0.4 ms against ~20 ms). Whatever the graph's walk comes to
+hide or show, discovery does not follow it there.
 
 **Why this is its own module.** Not `status.py`: nothing here is about the
 porcelain format, and the click router will want the same answer without dragging
@@ -115,20 +122,31 @@ def _find(root: str, max_depth: int, max_checkouts: int, max_dirs: int) -> list[
     return found[:max_checkouts]
 
 
+def _is_uninteresting(name: str) -> bool:
+    """Whether a directory named `name` is not worth opening in search of a `.git`.
+
+    Structural noise is `tree`'s answer, borrowed so a row this feature produces
+    always points at a part of the tree the graph actually draws. The dotted
+    rule is discovery's own and stays here permanently: a working tree is never
+    inside a dotted directory, and skipping them by name keeps this walk in the
+    tenths of a millisecond that justify calling it before every status round.
+    """
+    return tree.is_structural_noise(name) or name.startswith(".")
+
+
 def _child_directories(directory: str) -> list[str]:
     """The subdirectory names of `directory` worth walking into, sorted.
 
     Symlinked directories are excluded rather than followed: a link back into the
-    tree would report the same checkout twice, and a loop would never end. The
-    noise rule is `tree`'s own, so a row this feature produces always points at a
-    part of the tree the graph actually draws.
+    tree would report the same checkout twice, and a loop would never end. What
+    counts as worth walking into is `_is_uninteresting`'s answer.
     """
     try:
         with os.scandir(directory) as entries:
             names = [
                 entry.name
                 for entry in entries
-                if not tree._is_ignored_dir(entry.name)
+                if not _is_uninteresting(entry.name)
                 and entry.is_dir(follow_symlinks=False)
             ]
     except OSError:
