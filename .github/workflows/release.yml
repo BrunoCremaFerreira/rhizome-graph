@@ -1,0 +1,163 @@
+# Build the Debian package on a machine nobody configured by hand, and publish
+# it when a version tag is pushed.
+#
+# The one thing to understand before editing this file: `packaging/build-deb.sh`
+# derives the package's `Depends: python3 (>= 3.N), (<< 3.N+1)` range, and the
+# minor version its vendored virtualenv is bound to, from whatever interpreter
+# runs it. The runner image is therefore not an environment detail -- it is a
+# field in the shipped control file. That is why the image is pinned to a
+# release below, and why nothing here puts a second interpreter on PATH.
+#
+# What this does NOT do: build anything for macOS. There is no .dmg and no .app
+# in this repository; the macOS path is the Homebrew formula, which fetches a
+# release asset rather than being built here.
+name: Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+# Read by default; only the job that publishes asks for more.
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build the .deb
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node builds `web/dist`, which is gitignored and therefore absent from
+      # the checkout. 20 is the current LTS; the front-end suite runs on the
+      # same version in the same job a few steps below, so a divergence from a
+      # developer's older Node shows up as a red test rather than as a bundle
+      # that quietly differs from the one that was reviewed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # dpkg-deb comes with the image. These do not.
+      - name: Install the packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv python3-pip fakeroot
+
+      # A virtualenv built by the DISTRIBUTION's python3, so the suite runs
+      # under the same interpreter the package will be bracketed to. Ubuntu
+      # marks its system Python externally managed, so an environment is
+      # required here rather than merely tidy.
+      - name: Install the project and its test dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet -e '.[dev]'
+
+      # `ci` and not the resolving install: this project has already seen npm 10
+      # rewrite fields out of the committed lock file, and a release must build
+      # the dependency tree that was reviewed.
+      - name: Build the front end
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      # RHIZOME_PACKAGE_TESTS=1 opts into the slow half: a real wheel and a real
+      # .deb are built inside the suite. Those are exactly the tests worth
+      # having here, since this job exists to produce a package.
+      - name: Run the Python suite
+        run: RHIZOME_PACKAGE_TESTS=1 .venv/bin/pytest -q
+
+      - name: Run the front-end suite
+        run: |
+          cd web
+          npx --no-install vitest run
+
+      # CLAUDE.md rule 5: YY.MM.NNN, or YY.MM.NNN-BB for a bugfix of that exact
+      # release. Checked on every run, not only on a tag, so a malformed number
+      # is caught in the pull request that introduces it rather than at the
+      # moment somebody is trying to publish.
+      - name: Check the release number
+        run: |
+          version="$(sed -n '1s/^[^(]*(\([^)]*\)).*/\1/p' debian/changelog)"
+          echo "debian/changelog declares ${version}"
+          if ! echo "${version}" | grep -Eq '^[0-9]{2}\.[0-9]{2}\.[0-9]{3}(-[0-9]{2})?$'; then
+              echo "::error::${version} is not YY.MM.NNN or YY.MM.NNN-BB" >&2
+              exit 1
+          fi
+
+      # The asset's name comes from debian/changelog, never from the tag, so a
+      # tag that disagrees would publish v26.08.002 carrying a file called
+      # rhizome-graph_26.08.001_amd64.deb and nothing downstream would notice.
+      - name: Check the tag against the version the package will carry
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(sed -n '1s/^[^(]*(\([^)]*\)).*/\1/p' debian/changelog)"
+          if [ "${tag}" != "${version}" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match debian/changelog ${version}" >&2
+              exit 1
+          fi
+
+      # Into the runner's temporary directory, never into the checkout: the
+      # script's own contract is that it leaves the source tree exactly as it
+      # was, and a stray directory named dist or web at the root is precisely
+      # what confuses the front-end search this package exists to satisfy.
+      - name: Build the package
+        run: packaging/build-deb.sh "${RUNNER_TEMP}/packages"
+
+      - name: Record the digest
+        run: |
+          cd "${RUNNER_TEMP}/packages"
+          sha256sum ./*.deb | tee SHA256SUMS
+
+      # Without this the package exists only inside a finished job. It is what
+      # makes a workflow_dispatch run useful, and it is how the publishing job
+      # below receives the file instead of building it a second time.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rhizome-graph-deb
+          path: ${{ runner.temp }}/packages/*
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+
+    # The whole cost of publishing, and nothing wider. `gh` is preinstalled on
+    # the runner and takes this token, so no third-party action is trusted with
+    # the checkout for the sake of one command.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rhizome-graph-deb
+          path: packages
+
+      # The notes are the changelog entry a human wrote, not a generated list of
+      # commit subjects: everything above the second entry's header.
+      - name: Take the release notes from the changelog
+        run: awk 'NR > 1 && /^rhizome-graph \(/ { exit } { print }' debian/changelog > "${RUNNER_TEMP}/notes.md"
+
+      - name: Create the release and attach the package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+              --verify-tag \
+              --title "${GITHUB_REF_NAME}" \
+              --notes-file "${RUNNER_TEMP}/notes.md" \
+              packages/*

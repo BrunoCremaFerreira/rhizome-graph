@@ -84,6 +84,11 @@ SCANNED_DIRS = (
     "debian",
     "Formula",
     "packaging",
+    # The CI workflows. They are authored files whose step names and error
+    # messages a human reads in a job log, which is exactly what rule 4 covers;
+    # left out, a new top-level directory would be silently exempt from the
+    # repository's own language rule.
+    ".github/workflows",
 )
 SCANNED_FILES = ("start.sh", "run.sh", "pyproject.toml")
 
@@ -102,6 +107,7 @@ SCANNED_SUFFIXES = {
     ".toml",
     ".md",
     ".rb",
+    ".yml",
 }
 
 #: Build output, not authored sources: `tmp`, `files` and `.debhelper` are what

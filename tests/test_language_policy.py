@@ -48,6 +48,11 @@ SCANNED_DIRS = (
     "debian",
     "Formula",
     "packaging",
+    # The CI workflows. They are authored files whose step names and error
+    # messages a human reads in a job log, which is exactly what rule 4 covers;
+    # left out, a new top-level directory would be silently exempt from the
+    # repository's own language rule.
+    ".github/workflows",
 )
 
 #: Individually scanned files, named by their path relative to the repository
@@ -78,6 +83,7 @@ SCANNED_SUFFIXES = {
     ".json",
     ".md",
     ".rb",
+    ".yml",
 }
 
 #: Directories that hold somebody else's bytes rather than authored text.
