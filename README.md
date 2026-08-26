@@ -1,324 +1,429 @@
-# rhizome-graph
+<h1 align="center">rhizome-graph</h1>
 
-**Real-time web visualization** of what each Claude Code agent is doing — creating, editing,
-and deleting files and directories — rendered with the look of
-[Gource](https://gource.io/). Unlike Gource (a desktop binary), it runs in the browser.
+<p align="center">
+  <b>Watch your Claude Code agents work.</b><br/>
+  A live, Gource-style map of every file your agents read, write and delete — in the browser,
+  as it happens.
+</p>
 
-Each agent shows up as an **actor** emitting beams toward the files it touches; files are
-bright colored dots on a force-laid-out directory tree with a _bloom_ effect — Gource's
-signature look.
+<p align="center">
+  <img src="docs/images/hero.png" alt="Three agents at work on this repository: violet rings on the files being read, a beam from an agent figure to the file it is touching, and the recent-changes list filling in at the bottom left" width="100%"/>
+</p>
 
-> **Status:** working web MVP, verified end to end. The in-browser visual has not been
-> validated visually yet. See [Status and limitations](#status-and-limitations).
+An agent session is a wall of scrolling text. This turns it into a picture: your project as a
+force-laid-out tree of glowing dots, one **actor** per agent, a **beam** from the actor to every
+file it touches, and the file flaring as it changes. Subagents get their own figure and their own
+colour, so `developer-backend` and `developer-tester` working at once look like two people working
+at once — because that is what they are.
+
+It is not a recording and not a replay: it is the current second, at ~60 fps, over a WebSocket.
+
+> **Why it looks like [Gource](https://gource.io/)** — because Gource got it right. We do not
+> embed it (it is GPLv3, this is MIT); we reimplement the look in WebGL and keep its log format as
+> our vocabulary.
+
+---
+
+## Try it in two minutes
+
+```bash
+git clone https://github.com/BrunoCremaFerreira/rhizome-graph && cd rhizome-graph
+RHIZOME_PROJECT_ROOT=/path/to/the/project/you/want/to/watch ./start.sh
+```
+
+Then open **<http://localhost:8080>**. The tree is already there — the daemon walks the project at
+boot, so the page opens on your project, not on a blank field.
+
+Installed as an application, it is one command:
+
+```bash
+rhi /path/to/the/project/you/want/to/watch   # opens a window, serves the same page on :8080
+rhi --install-hooks                          # ask it to install the capture hooks
+rhi --doctor                                 # are the hooks installed? are they still valid?
+```
+
+Point it at the project you want to **watch**, not at `rhizome-graph` itself — or start anywhere
+and switch roots live with `ctrl+L`.
+
+**Attribution needs one more step:** without the capture hooks you still see the tree move, but
+nobody is on camera. See [Putting agents on camera](#putting-agents-on-camera). The page tells you
+so itself when it notices changes arriving with no author.
+
+---
+
+## What you are looking at
+
+| On screen | What it means |
+|---|---|
+| **Dot** | a file, coloured by extension — or by size, if you press `F7` |
+| **Cluster** | a directory, always named |
+| **Bright flash, amber** | a file just changed (`M`) |
+| **Bright flash, green / red** | a file was created (`A`) / deleted (`D`) |
+| **Violet pulsing ring** | an agent is **reading** that file right now (`R`) |
+| **Figure with a name** | an agent — the readable `agent_type` of a subagent, or the session |
+| **Beam** | that agent, touching that file, in the last second |
+| **List, bottom left** | recent changes, folded (`web/src/renderer.ts ×3`) |
+| **Caption, bottom centre** | the observed root and its current git branch |
+| **Panel, bottom right** | what is uncommitted, across every checkout under the root |
+
+Reads matter more than they sound. An agent reads roughly ten times more than it writes, and until
+`R` existed the graph stayed dark through the half of the work that explains the other half: it
+read six files, then wrote one, and only the write was on camera. A write is a **flash that
+decays**; a read is a **ring that pulses** — a different shape, not a different shade, so the two
+never blur together through the bloom.
+
+The camera auto-fits the whole tree until you touch it, then holds your framing so a label stays
+still long enough to read. Double-click hands control back.
+
+---
+
+## Click a file. It opens.
+
+<p align="center">
+  <img src="docs/images/file-view.png" alt="The file panel over the graph, showing a Python source file syntax-highlighted in VS Code's Dark+ theme" width="100%"/>
+</p>
+
+Clicking a dot — or pressing `Enter` on a search hit, or clicking a row in the git status panel —
+opens what is inside it. The answer is, in this order:
+
+1. the **`git diff HEAD`** of that path, if it has uncommitted changes,
+2. else its **text**,
+3. else an **`xxd` hex dump**, byte for byte (the tests compare against the installed `xxd`, not
+   against a written spec).
+
+The colours are not an imitation of VS Code: `shiki` carries the real TextMate grammars and the
+real Dark+ theme, so `#569CD6` on a keyword is the colour VS Code would paint. The whole
+highlighter is lazy — it is not in the entry chunk, and each of the 22 grammars is its own chunk
+loaded the first time you open a file in that language. An unknown extension gets a gutter and no
+colour, deliberately: no generic lexer guessing.
+
+A dirty file reads like the CLI — old/new line-number gutter, a full-width translucent stripe per
+row, syntax colour on top:
+
+<p align="center">
+  <img src="docs/images/diff.png" alt="A unified diff in the panel: line-number gutter, green and red row stripes, syntax colours over them, and the uncommitted-changes panel at the bottom right" width="100%"/>
+</p>
+
+`Escape` or the `×` closes it. The backdrop deliberately does **not** — a stray click outside must
+not throw away a long read.
+
+---
+
+## Find things
+
+**`ctrl+F` — by name.** Substring on the file name, or on the whole path once the query contains a
+`/`. Matches turn cyan, `F3` walks them one at a time, the camera follows, and `Enter` opens the
+one you are resting on.
+
+**`ctrl+shift+F` — by content.** The browser cannot read your disk, so the daemon greps it: no
+fork, no `re`, no `git grep` (which would miss untracked files and has nothing to say about a
+directory that is not a repository). Matching files light up on the graph, and `F3` walks
+**occurrence by occurrence, across files** — each step that crosses into another file flies the
+camera to its dot and opens that file in a panel **docked to the right**, matches tinted, the
+active one stronger, scrolled to its row.
+
+<p align="center">
+  <img src="docs/images/content-search.png" alt="Content search: the in-files bar at the top, matching files lit on the graph, and the docked panel showing the matched line highlighted" width="100%"/>
+</p>
+
+The graph stays live and clickable underneath while you read — which is exactly why the content
+walk is allowed to open files and the name walk is not.
+
+**`F7` — colour by size.** The tree repaints on a size ramp, with a legend in the top-right corner
+saying what the colours are worth. Files and directories get their own scale, because a directory
+is the sum of its files and on the files' scale the answer would only ever be "directories are
+big".
+
+<p align="center">
+  <img src="docs/images/size.png" alt="The tree recoloured on a size ramp from blue to red, with a legend in the top-right corner giving the byte values behind the colours" width="100%"/>
+</p>
+
+**`ctrl+L` — change the project.** A bar with shell-style tab completion (the daemon answers it,
+since the browser cannot list your disk). The switch is global: one daemon watches one root, so
+every open viewer follows.
 
 ---
 
 ## How it works
 
-We neither reimplement capture from scratch nor embed Gource's code: we leverage
-**Claude Code hooks** to capture file operations and reproduce Gource's look in WebGL
-(three.js).
+Nothing here reimplements capture, and nothing here parses a diff by hand. Claude Code already
+emits a hook on every tool call; the filesystem already reports every write.
 
 ```mermaid
 flowchart LR
-    A["Claude Code<br/>agent(s)"] -->|"PostToolUse (JSON)"| B["hooks/emit_event.py"]
-    B -->|"JSON line<br/>over Unix socket"| C["daemon/server.py"]
+    A["Claude Code<br/>agent + subagents"] -->|"PostToolUse (JSON)"| B["rhizome_graph/hook.py<br/>(stdlib only, always exit 0)"]
+    B -->|"JSON line<br/>over a Unix socket"| C["daemon/server.py"]
     F["project files"] -->|"inotify"| W["daemon/watcher.py"]
     W -->|"what changed"| C
-    T["rhizome_graph/tree.py"] -->|"initial snapshot"| C
-    C -->|"event<br/>over WebSocket"| D["web/ (three.js)<br/>Gource-style renderer"]
-    C -->|"HTTP :8080"| D
+    T["rhizome_graph/tree.py"] -->|"boot snapshot"| C
+    C -->|"events over WebSocket<br/>+ the page over HTTP, one port"| D["web/ (three.js)<br/>Gource-style renderer"]
 ```
 
-**Two capture sources, on purpose.** Hooks know *who* — they carry the agent's session id —
-but they only see Claude's own file tools, and they cannot resolve a glob or a compound
-shell command. The filesystem watcher knows *what* — every change, whoever made it — but
-nothing about authorship. The daemon combines them: a filesystem change that lands within a
-few seconds of a hook inherits that hook's agent, so `cp src/*.md docs/` draws the agent's
-beam at each file actually copied.
+**Two capture sources, on purpose.** Hooks know *who* — they carry the agent's id — but they only
+see Claude's own file tools and cannot resolve a glob or a compound shell command. The watcher
+knows *what* — every change, whoever made it — but nothing about authorship. The daemon combines
+them: a filesystem change landing within a few seconds of a hook inherits that hook's agent, so
+`cp src/*.md docs/` draws a beam at each file actually copied, and a path a hook just reported is
+suppressed on the watcher side so one write flashes exactly once.
 
-1. **Seed** — at boot the daemon walks `RHIZOME_PROJECT_ROOT` (`rhizome_graph/tree.py`,
-   skipping `.git`, `node_modules`, build output) and publishes the existing tree. The page
-   opens on the project, not on a blank field. Every client gets this snapshot on connect,
-   however long the daemon has been up.
-2. **Capture** — a `PostToolUse` hook (on `Write`/`Edit`/`MultiEdit`/`Bash`) fires
-   `hooks/emit_event.py`, which merely **forwards** the raw event JSON. The hook is _pure
-   stdlib_, dependency-free, and **always exits with code 0** — it never stalls the Claude
-   Code session. In parallel, `daemon/watcher.py` reports real changes on disk.
-3. **Normalization + aggregation** — `daemon/server.py` receives events over a _Unix
-   socket_, normalizes each one, decides `A` (added) vs `M` (modified) from the set of
-   already-seen paths, attributes filesystem changes to the agent that was just active, and
-   drops the duplicate a single write produces on both channels.
-4. **Transport** — the daemon rebroadcasts each event over **WebSocket** and serves the
-   frontend over HTTP.
-5. **Rendering** — the browser draws the tree with d3-force + three.js (`UnrealBloomPass`),
-   with a Gource-style figure per agent firing beams at the files it touches, and names on
-   the directories and on whichever files are worth naming right now (see
-   [Reading the graph](#reading-the-graph)).
+1. **Seed** — the daemon walks the root once at boot (skipping `.git`, `node_modules`, build
+   output) and publishes the tree. Every client gets that snapshot on connect, however long the
+   daemon has been up.
+2. **Capture** — the `PostToolUse` hook **forwards the raw payload and nothing else**: pure
+   stdlib, no third-party import, and it **always exits 0**. A hook that fails loudly degrades the
+   agent session it was supposed to be watching.
+3. **Normalize + aggregate** — the daemon owns the shared state: the set of seen paths (which is
+   what decides `A` vs `M`, and what lets a directory delete prune its subtree), the seed, the
+   replay buffer, and who acted last.
+4. **Transport** — a Unix socket in, WebSocket + static HTTP out, **on a single port**. One
+   forwarded port is enough for SSH or VS Code remote, and the browser derives the socket URL from
+   its own origin.
+5. **Render** — three.js, d3-force and `UnrealBloomPass`. Every decision worth testing lives in a
+   pure module the renderer only draws the result of.
 
-### Event format (WebSocket, JSON)
+### The event on the wire
 
 ```json
-{ "ts": 1754870400.12, "agent": "agent-worker", "type": "A", "path": "src/api/users.ts", "color": "33FF33", "origin": "hook" }
+{ "ts": 1754870400.12, "agent": "a4f1…", "label": "developer-backend",
+  "type": "M", "path": "web/src/renderer.ts", "color": "FFAA00", "origin": "hook" }
 ```
 
-`type` is `A`/`M`/`D`; `color` is hex without `#` (A→`33FF33`, M→`FFAA00`, D→`FF3333`).
-
-`origin` says what produced the event and how loudly to draw it:
+`type` is `A`dded, `M`odified, `D`eleted or `R`ead (`R` is ours, not Gource's: the file was
+*opened*, nothing about the tree changed). `origin` says how loudly to draw it:
 
 | `origin` | Meaning | On screen |
 |---|---|---|
-| `hook` | a Claude Code tool call | file flashes, agent figure + beam |
-| `watch` | a change seen on disk | file flashes; figure + beam only if attributed |
+| `hook` | a Claude Code tool call | flash or ring, agent figure, beam |
+| `watch` | a change seen on disk | flash; figure and beam only if attributed |
 | `seed` | part of the boot snapshot | dim node, no figure, no flash |
 
-`agent` is `""` when the change could not be credited to anyone (a seeded file, a manual
-edit, a build step). Such events still show the file changing, but never invent an actor.
+`agent` is **identity**, `label` is only text. An event with `agent: ""` — a seeded file, a manual
+edit, a build step — is real and is drawn, but never invents an actor.
 
 ---
 
-## Reading the graph
+## Putting agents on camera
 
-| Input | Effect |
-|---|---|
-| wheel / trackpad scroll | zoom under the cursor |
-| drag | pan |
-| double-click | hand control back to auto-fit |
-
-The camera auto-fits the whole tree until you touch it; from then on it holds your framing,
-so a label stays still long enough to read. Double-click resumes following.
-
-**Directories are always named.** **Files are named when there is a reason to name one:**
-whichever files were just touched — the name fades out with the highlight, like the file
-itself — plus, once you zoom in far enough to have room, the idle files still on screen.
-Naming all of them at once would be an unreadable wall of text on any real project.
-
-Names hold the same size on screen at every zoom level: they are sized in pixels, not in
-world units, so they neither shrink to nothing when the whole project is framed nor swallow
-the screen when you are down to a single file.
-
----
-
-## Requirements
-
-- **Python 3.10+** (for the daemon; the hook uses the stdlib only). The daemon needs
-  `websockets` and `watchdog` — `pip install -e '.[daemon]'`, or just run `./start.sh`.
-- **Node.js 18+ / npm** — only to _build_ the frontend. If `web/dist` already exists, you can
-  run without Node.
-
-> If you edit anything under `web/src/`, you need Node: the daemon serves the built
-> `web/dist` from disk, and `start.sh` **silently serves a stale build** when Node is
-> missing — a front-end change then looks like it did nothing. Rebuild with
-> `./start.sh --rebuild`.
-
----
-
-## Quick start
+The graph moves without hooks. It gets **names and figures** only with them.
 
 ```bash
-./start.sh
+rhi --install-hooks     # writes into the observed project's .claude/settings.json, after asking
+rhi --doctor            # reads BOTH ~/.claude and the project's file, the way Claude Code does
 ```
 
-`start.sh` does the full bootstrap idempotently: it creates the `.venv`, installs the daemon
-deps, generates `web/dist` (if needed), and brings the daemon up. When it finishes, open:
-
-```
-http://localhost:8080
-```
-
-### start.sh modes
-
-| Command | Effect |
-|---|---|
-| `./start.sh` | prod — ensures the build and serves `web/dist` at `http://localhost:8080` |
-| `./start.sh --dev` | daemon + Vite dev server with hot reload (`http://localhost:5173`) |
-| `./start.sh --rebuild` | forces a reinstall/rebuild of the frontend |
-| `./start.sh --no-build` | skips the frontend, serves the existing `web/dist` |
-| `./start.sh --print-token` | prints the control token and exits, starting nothing |
-| `./start.sh --help` | help |
-
-> `run.sh` is a minimal launcher (daemon only, assuming everything is already prepared). For
-> the "from zero to running" flow, use `start.sh`.
-
----
-
-## Installing capture in the observed project
-
-The daemon only receives events if the project you want to visualize has the hook installed.
-Copy the `"hooks"` block from [`config/settings.json`](config/settings.json) into the
-`.claude/settings.json` **of the observed project**, adjusting the absolute path to
-`emit_event.py`:
+`rhi` never writes silently: `.claude/settings.json` is a committed file in many repositories, and
+merging hook arrays behind your back is how someone loses a hook. To do it by hand, copy the
+`"hooks"` block from [`config/settings.json`](config/settings.json):
 
 ```json
 {
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|Bash",
-        "hooks": [
-          { "type": "command", "command": "python3 /path/to/rhizome-graph/hooks/emit_event.py" }
-        ]
+        "matcher": "Write|Edit|MultiEdit|Bash|Read",
+        "hooks": [{ "type": "command", "command": "/usr/bin/rhi-hook" }]
       }
     ]
   }
 }
 ```
 
-From then on, every file operation in that project becomes an event in the graph.
+`Read` is in the matcher on purpose: it is not a change to the tree at all, but it is what lights a
+file violet while an agent is looking at it. From a checkout with nothing installed the command is
+`python3 /path/to/rhizome-graph/hooks/emit_event.py` instead — one implementation, reached by the
+older name. Prefer the installed `rhi-hook` where you have it: a hook naming a path inside somebody's
+checkout stops working the day that checkout moves, and it then fails *louder* than a missing hook —
+a blocking error on every tool call, degrading the agent session rather than the graph. That is the
+rot `--doctor` exists to find.
 
-**Hook changes only take effect in a new session** — Claude Code reads `settings.json` at
-startup, so a session that was already open when you installed the block keeps running
-without it.
-
-The hook is not what makes changes appear: the watcher reports those on its own. The hook is
-what puts a **name and a figure** on them. Without it you still see the tree move, with no
-actor attached.
+**Hook changes only apply to sessions started afterwards** — Claude Code reads `settings.json` at
+startup.
 
 ### When nothing shows up
 
-The hook swallows every error by design, so a daemon that is not running looks exactly like
-a healthy setup with nothing to report. To tell them apart, point `RHIZOME_DEBUG_LOG` at
-a file in the observed project's hook command:
+The hook swallows every error by design, so "the daemon is down" looks exactly like "nothing is
+happening". To tell them apart, set `RHIZOME_DEBUG_LOG` on the hook command to record its
+*failures*, or `RHIZOME_TRACE_LOG` to record every raw payload — which is how the shape of the
+hook JSON gets re-settled on a new Claude Code version.
 
-```json
-{ "type": "command", "command": "RHIZOME_DEBUG_LOG=/tmp/rhizome-graph-hook.log python3 /path/to/rhizome-graph/hooks/emit_event.py" }
-```
-
-Failures are appended there. Unset, the hook stays completely silent.
+**A tree that updates while nobody is on camera means the hooks are not installed.** The page says
+so itself, in the HUD, once activity has arrived with no author.
 
 ---
 
-## Configuration
+## Reference
 
-Environment variables (all optional):
+### Keys
+
+| Key | Effect |
+|---|---|
+| scroll / drag | zoom under the cursor / pan |
+| double-click | hand control back to auto-fit |
+| hover | name the dot under the pointer |
+| click | open the file |
+| `ctrl+F` | search by name — `F3` walks, `Enter` opens |
+| `ctrl+shift+F` | search inside files — `F3` walks occurrences and opens them docked |
+| `F3` | next match |
+| `F7` | colour the tree by file size |
+| `ctrl+L` | change the observed root (with tab completion) |
+| `Esc` | close the panel, then the search bar |
+
+### `rhi`
+
+| Command | Effect |
+|---|---|
+| `rhi DIR` | watch `DIR`, open a window, serve the page on `:8080` |
+| `rhi --no-window` | headless host: serve the page and open nothing |
+| `rhi --port N` / `--socket PATH` | an explicit request is **obeyed or refused**, never adjusted |
+| `rhi --doctor` | report the hooks and start nothing |
+| `rhi --install-hooks` | write the hooks into the project's `.claude/settings.json` |
+
+The default port *is* adjusted — `:8080` busy means it walks on and prints what it got — because a
+default may move and an explicit request may not: a user who typed `9000` and silently got `9001`
+has been lied to.
+
+### `start.sh` (from a checkout)
+
+| Command | Effect |
+|---|---|
+| `./start.sh` | full idempotent bootstrap: venv, deps, `web/dist`, daemon on `:8080` |
+| `./start.sh --dev` | daemon + Vite with hot reload on `:5173` |
+| `./start.sh --rebuild` | force a reinstall and rebuild of the front end |
+| `./start.sh --no-build` | serve the existing `web/dist`, skip Node entirely |
+| `./start.sh --print-token` | print the control token and start nothing |
+
+`run.sh` is the minimal launcher (daemon only, everything assumed prepared).
+
+### Environment
 
 | Variable | Default | Description |
 |---|---|---|
-| `RHIZOME_SOCKET` | `/tmp/rhizome-graph.sock` | Ingest Unix socket (hook ↔ daemon). |
-| `RHIZOME_HTTP_PORT` | `8080` | Single port serving `web/dist` **and** the WebSocket at `/ws`. |
-| `RHIZOME_PROJECT_ROOT` | cwd | Root the daemon seeds, watches, and makes paths relative to. |
-| `RHIZOME_DEBUG_LOG` | _unset_ | Set on the **hook** to append its failures to that file. Unset = total silence. |
-| `RHIZOME_TOKEN` | minted at boot | Control token. Set it to pin a known value; leave it alone for the normal case. |
-
-The socket must match between the hook and the daemon; if you change one, change the other.
+| `RHIZOME_PROJECT_ROOT` | cwd | the project to seed, watch and relativize paths against |
+| `RHIZOME_HTTP_PORT` | `8080` | one port for the page **and** the WebSocket at `/ws` |
+| `RHIZOME_SOCKET` | `/tmp/rhizome-graph.sock` | ingest socket; hook and daemon must agree |
+| `RHIZOME_WEB_DIST` | searched | where the built front end lives — obeyed or refused, never overruled |
+| `RHIZOME_STATUS_INTERVAL` | `3` | seconds between `git status` polls; `≤ 0` disables them |
+| `RHIZOME_TOKEN` | minted at boot | the control token (see below) |
+| `RHIZOME_DEBUG_LOG` | unset | set it on the **hook** to record its failures |
+| `RHIZOME_TRACE_LOG` | unset | set it on the **hook** to record every raw payload |
 
 ### The control token
 
-Watching the graph needs nothing. **Commanding** it — switching the root with `ctrl+L`, its
-tab-completion, and clicking a file open — needs a token, because the two-way half of the
-socket can read files off the host.
+Watching costs nothing. **Commanding** — `ctrl+L`, its tab completion, opening a file, searching in
+files — needs a token, because that half of the socket can read files off the host.
 
-The daemon mints one at boot and injects it into the `index.html` it serves, so the page you
-loaded already carries it and there is nothing to type. That holds through `ssh -L` and VS
-Code forwarding on **any** local port, since the page and its token travel together.
+The daemon mints one at boot and **injects it into the `index.html` it serves**, so the page you
+loaded already carries it and there is nothing to type. That survives `ssh -L` and VS Code
+forwarding on any port, since the page and its token travel together.
 
-What it stops is the pair of things a loopback check cannot see. A WebSocket handshake is
-exempt from the same-origin policy, so any page in your browser could otherwise open
-`ws://127.0.0.1:8080/ws` and drive the daemon; it cannot read this token, because same-origin
-is exactly what stops it fetching the page the token lives in. And any loopback-side proxy
-makes a remote connection look local — `--dev` runs one — while carrying no token at all.
+It exists because the peer's address lies, in two measured ways. A WebSocket handshake is exempt
+from the same-origin policy and needs no preflight, so any page in any browser on the host can open
+`ws://127.0.0.1:8080/ws` and start sending commands — it just cannot read this token, because
+same-origin is precisely what stops it fetching the page the token lives in. And any loopback-side
+proxy launders a remote connection into a local one; `--dev` runs one.
 
-Set `RHIZOME_TOKEN` yourself only when something outside the page has to send a command (a
-script, a probe); `./start.sh --print-token` prints what the daemon expects without starting
-it. In `--dev` the same value is exported to Vite as `VITE_RHIZOME_TOKEN`, since there the page
-comes from Vite and the daemon never touches it.
-
-**If the graph draws but every command is refused, this is why** — not a broken page. Check
-that daemon and page agree on the token.
-
-`RHIZOME_PROJECT_ROOT` is the project you want to *watch* — set it to the observed
-project, not to `rhizome-graph` itself:
-
-```bash
-RHIZOME_PROJECT_ROOT=/path/to/observed/project ./start.sh
-```
-
-`RHIZOME_WS_PORT` is obsolete: the page and the WebSocket share one port, so the browser
-derives the socket URL from the origin it loaded from. Viewing over SSH or VS Code remote
-therefore needs only `RHIZOME_HTTP_PORT` forwarded — a hard-coded `localhost` WebSocket
-port would otherwise resolve to the *viewer's* machine and never connect.
+**If the graph draws but every command is refused, this is why** — not a broken page.
+`./start.sh --print-token` shows what the daemon expects.
 
 ---
 
-## Project structure
+## Requirements
 
-```
-rhizome_graph/normalize.py   # pure core: hook JSON -> Event (defensive, never raises)
-rhizome_graph/tree.py        # boot snapshot of the project tree (the seed events)
-rhizome_graph/token.py       # pure: the control token — mint, compare, inject into the page
-hooks/emit_event.py        # hook: stdlib, forwards the event, always exit 0
-daemon/server.py           # asyncio: ingest + seed + attribution + WebSocket + HTTP
-daemon/watcher.py          # inotify watcher: what changed, whoever changed it
-config/settings.json       # hooks block to copy into the observed project
-web/                       # TypeScript frontend (Vite)
-  src/protocol.ts          #   typed event parsing/validation
-  src/simulation.ts        #   pure model: directory tree, actors, fade
-  src/layout.ts            #   d3-force
-  src/view.ts              #   pure: zoom/pan camera state
-  src/labels.ts            #   pure: label size, placement, which files get named
-  src/avatar.ts            #   the agent figure, painted on a canvas
-  src/renderer.ts          #   three.js + UnrealBloomPass (Gource look)
-  src/wsClient.ts          #   WebSocket client with reconnection (stamps the control token)
-  src/token.ts             #   pure: read the control token, stamp it on a command frame
-.claude/agents/            # the specialist agents that develop this repo
-tests/                     # pytest (backend)
-web/tests/                 # vitest (frontend)
-start.sh / run.sh          # bootstrap+run / minimal daemon launcher
-```
+- **Python 3.10+** for the daemon (`websockets`, `watchdog` — `pip install -e '.[daemon]'`, or just
+  run `./start.sh`). The hook itself needs **nothing**.
+- **Node.js 18+** only to *build* the front end. If `web/dist` exists you can run without Node.
+- **`git`** is optional — without it the diff and the uncommitted-changes panel simply go quiet.
+
+> If you edit anything under `web/src/`, you need Node: `start.sh` **silently serves a stale
+> build** when Node is missing, so a front-end change then looks like it did nothing. Rebuild with
+> `./start.sh --rebuild`.
+
+### Installing
+
+| From | How |
+|---|---|
+| a checkout | `pip install -e '.[daemon]'` and run `rhi`, or just `./start.sh` |
+| a `.deb` | `packaging/build-deb.sh` builds one that writes nothing into the checkout; it installs `rhi` and `rhi-hook` |
+| Homebrew | [`Formula/rhizome-graph.rb`](Formula/rhizome-graph.rb) |
+
+The `.deb` vendors **`websockets` and nothing else** (1.4 MB) so that `python3-watchdog` and
+`python3-gi` keep coming from the distribution and its security updates, and `git` is a
+*Recommends*, not a *Depends*. The two commands split along the same line the hook doctrine does:
+`rhi-hook` is `#!/usr/bin/python3` and never pays a virtualenv's import cost on the agent's hot
+path, while `rhi` names the vendored interpreter, because the daemon imports
+`websockets.asyncio.server`. Neither has been installed on a real machine yet — see
+[Status](#status).
 
 ---
 
 ## Development
 
-`renderer.ts` needs a WebGL context and so cannot be unit-tested. Every decision worth
-testing therefore lives in a pure sibling that imports neither three.js nor the DOM —
-`simulation.ts`, `view.ts`, `labels.ts` — and the renderer only draws what they return. New
-front-end logic belongs in one of those, not in the renderer.
-
-This project follows **TDD** (test before code) and is developed by **specialist agents**
-defined in [`.claude/agents/`](.claude/agents) — see [`CLAUDE.md`](CLAUDE.md) for the rules
-and the workflow.
+Built test-first, by [specialist agents](.claude/agents) — a tester that writes only failing tests,
+a backend and a frontend developer that take them green, an architect and a security auditor that
+write no code at all. The rules are in [`CLAUDE.md`](CLAUDE.md).
 
 ```bash
-# backend (pytest)
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest
+.venv/bin/python -m pytest          # backend
 
-# frontend (vitest + type-check + build)
 cd web && npm install
-npm test
-npm run build
+npm test && npm run build           # frontend
+```
+
+`renderer.ts` needs a WebGL context and cannot be unit-tested, so every decision worth testing
+lives in a pure sibling that imports neither three.js nor the DOM — `simulation.ts`, `view.ts`,
+`labels.ts`, `search.ts`, `fileDoc.ts`, `sizeMode.ts` — and the renderer only draws what they
+return. New front-end logic belongs in one of those, not in the renderer.
+
+```
+rhizome_graph/   normalize · tree · paths · token · hexdump · safe_read · gitcmd
+                 diff · status · checkouts · file_view · content_search · cli · hook
+daemon/          server.py (seed, attribution, dedupe, WebSocket + HTTP) · watcher.py
+web/src/         renderer.ts (three.js) + the pure modules it draws
+tests/  web/tests/   pytest · vitest
 ```
 
 ---
 
-## Status and limitations
+## Status
 
-- ✅ Backend: 621 `pytest` green; the hook exits with `exit 0` on invalid input.
-- ✅ Frontend: 990 `vitest` green; `tsc` + `vite build` clean.
-- ✅ End-to-end integration, verified against a live daemon: the tree is seeded on connect, a
-  `Write` flashes exactly once across both channels, `cp *.md docs/` reports each file
-  actually copied and credits the agent, `rm -rf docs/` prunes the subtree, and an edit made
-  outside any agent shows up without an actor.
-- ⚠️ **In-browser visual not validated yet** — the renderer compiles, builds and passes its
-  unit tests, but fidelity to Gource has not been checked with a browser open.
+Working end to end, and honest about its edges.
 
-**Not yet implemented:**
+- ✅ **Backend** — 1364 `pytest` green (plus 20 opt-in packaging tests). Seeds the tree, ingests
+  hook events, watches the filesystem, serves the page and the WebSocket on one port, polls
+  `git status` across every checkout under the root, and answers file, search and root-completion
+  commands behind two gates.
+- ✅ **Frontend** — 1403 `vitest` green, `tsc` and `vite build` clean.
+- ✅ **Integration, against a live daemon** — the tree seeds on connect; a `Write` flashes exactly
+  once across both channels; `cp *.md docs/` credits the agent for each file actually copied;
+  `rm -rf docs/` prunes the subtree; a read outside the root produces no event at all; real
+  captured hook payloads replay into two distinct actors, the subagent's carrying its `agent_type`.
+- ⚠️ **The window and the packaging are unproven on a real desktop.** `rhi` opens a pywebview or
+  app-mode-browser window; that path has never run on a machine with a display. The `.deb` builds
+  and has been inspected but never installed; the Homebrew formula has never been executed at all.
+- ⚠️ **Visual tuning is unfinished.** The renderer is verified by unit tests and by the screenshots
+  above; how the read ring reads against a fresh write flash, and how sixteen repositories' worth
+  of status rows read at a narrow window, are judgements nobody has made on a real monitor yet.
 
-- Per-_subagent_ attribution (today: one actor per Claude Code session).
-- Custom avatar *images* per agent (today: a generated figure tinted by agent color).
-- Attribution is time-based: a filesystem change is credited to whichever agent acted in the
-  last few seconds. Two agents writing at the same instant can be credited to one of them.
-- `.gitignore` is not parsed — the seed and the watcher skip a fixed list of noisy
-  directories instead.
-- Session recording/replay and video export.
+> The screenshots on this page are real frames from a live daemon watching this repository, driven
+> by real hook payloads — but captured in headless Chromium on a **software** GL backend, at a few
+> frames per second. On a GPU the bloom is brighter and the motion is fluid; nothing else differs.
+
+**Not yet built:** per-repository grouping in the status panel, custom avatar *images* per agent,
+`.gitignore` parsing (a fixed skip list stands in), session recording and replay.
+
+**Known limits, by design:** attribution of *watcher* events is time-based, so two agents writing
+in the same instant can be credited to one of them (hook events themselves are attributed exactly);
+the parser stays silent rather than guessing a path from a glob or a directory destination, and
+lets the watcher fill it in milliseconds later; file content crosses the wire capped at 256 KiB;
+and label textures are rasterised at the pixel ratio the renderer started with, so dragging the
+window to a monitor of a different DPI leaves names slightly soft until a reload.
 
 ---
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). The visual is a **reimplementation** of Gource's look in WebGL; Gource's source
+(GPLv3) is not used or redistributed here, which is what lets this be MIT.
 
-- The visual is a **reimplementation** of Gource's look in WebGL; Gource's source code
-  (GPLv3) is **not** used or redistributed here — which is why this project can be MIT.
-- Gource: <https://gource.io/>
+Gource: <https://gource.io/>
