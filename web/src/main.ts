@@ -7,6 +7,12 @@
 
 import "./style.css";
 import { createSimulation } from "./simulation";
+import {
+  applyAgentStates,
+  closeAgentStates,
+  createAgentStates,
+  type AgentStateModel,
+} from "./agentState";
 import { createRenderer } from "./renderer";
 import { createWsClient, resolveWsUrl } from "./wsClient";
 import { createContextHud } from "./contextHud";
@@ -268,6 +274,17 @@ function boot(): void {
   // without learning that a mode exists.
   let sizeMode: SizeModeState = createSizeMode();
 
+  // And the same shape again for the actors: `agentState.ts` owns the adoption,
+  // the staleness cut and the departure window; this is the variable holding
+  // what it returned plus the one channel that paints it. The renderer asks the
+  // two selectors itself, every frame, because both are functions of `now`.
+  let agentStates: AgentStateModel = createAgentStates();
+
+  function showAgentStates(next: AgentStateModel): void {
+    agentStates = next;
+    renderer.setAgentStates(agentStates);
+  }
+
   function showSizeMode(next: SizeModeState): void {
     sizeMode = next;
     renderer.setSizeColors(sizeColors(sizeMode));
@@ -316,6 +333,11 @@ function boot(): void {
       // reset may have closed it, while it travelled -- and it is also where the
       // directories are summed and both scales are built, once per answer.
       onSizes: (frame) => showSizeMode(applySizes(sizeMode, frame)),
+      // Who is working, who is blocked and who has just stopped.
+      // `applyAgentStates` hands back the SAME reference when the frame changed
+      // nothing, which is what keeps a republished slot -- and every replay --
+      // from repainting every figure on the page.
+      onAgentStates: (frame) => showAgentStates(applyAgentStates(agentStates, frame)),
       // What is uncommitted right now. The frame is deduped by the daemon, so
       // this only fires when the working tree really changed.
       onStatus: (status) => statusHud?.render(status),
@@ -341,6 +363,9 @@ function boot(): void {
         // settles a walk that may still be in flight, by the same rule: the
         // state it lands on is no longer pending, so `applySizes` refuses it.
         showSizeMode(closeSizeMode(sizeMode));
+        // The actors of the old project are not the new one's: a ring left
+        // behind would sit on a figure standing over a tree it never touched.
+        showAgentStates(closeAgentStates(agentStates));
         attribution.reset();
         attributionHud?.update(false, false);
         // Only now does the bar close: the switch is confirmed, not merely sent.

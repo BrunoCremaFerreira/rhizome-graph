@@ -6,6 +6,7 @@
  */
 
 import {
+  parseAgentStates,
   parseCompletion,
   parseEvent,
   parseFileView,
@@ -16,6 +17,7 @@ import {
   parseSizes,
   parseStatus,
   type AgentEvent,
+  type AgentStates,
   type DaemonMeta,
   type FileView,
   type GitStatus,
@@ -36,6 +38,7 @@ export type FileViewSink = (view: FileView) => void;
 export type StatusSink = (status: GitStatus) => void;
 export type SearchResultSink = (result: SearchResult) => void;
 export type SizesSink = (sizes: SizesResult) => void;
+export type AgentStatesSink = (frame: AgentStates) => void;
 
 export interface WsClientOptions {
   /** Backoff floor / ceiling in ms. */
@@ -78,6 +81,16 @@ export interface WsClientOptions {
    * fall through and grow a node called "sizes" in the graph.
    */
   readonly onSizes?: SizesSink;
+  /**
+   * The daemon's picture of its own actors. Optional and consumed either way,
+   * for the same reason as the frames above: `parseEvent` ignores `kind`, so a
+   * page built before this frame existed would otherwise let it fall through —
+   * and this one carries no `ts`/`agent`/`type`/`path`/`color` at the top
+   * level, so it would be answered `null` and dropped with nothing logged
+   * anywhere. That silence is the failure mode, which is why the route below
+   * sits with the others rather than after `parseEvent`.
+   */
+  readonly onAgentStates?: AgentStatesSink;
 }
 
 /** Used only outside a browser (tests, SSR); real pages derive from location. */
@@ -130,6 +143,7 @@ export class WsClient {
   private readonly onStatus: StatusSink | undefined;
   private readonly onSearchResult: SearchResultSink | undefined;
   private readonly onSizes: SizesSink | undefined;
+  private readonly onAgentStates: AgentStatesSink | undefined;
 
   constructor(
     private readonly url: string,
@@ -146,6 +160,7 @@ export class WsClient {
     this.onStatus = options.onStatus;
     this.onSearchResult = options.onSearchResult;
     this.onSizes = options.onSizes;
+    this.onAgentStates = options.onAgentStates;
     this.delay = this.minDelay;
   }
 
@@ -268,6 +283,17 @@ export class WsClient {
     const sizes = parseSizes(raw);
     if (sizes) {
       this.onSizes?.(sizes);
+      return;
+    }
+    // Before `parseEvent` as well, and consumed with or without a sink: a
+    // frame of agent states is an answer about the ACTORS, not a change any of
+    // them made, so routing it on would grow a phantom node called
+    // "agentState" and put it back every time the daemon republished the slot.
+    // `parseEvent` ignores `kind`, so the ordering is the only thing keeping
+    // this answer out of the simulation.
+    const agentStates = parseAgentStates(raw);
+    if (agentStates) {
+      this.onAgentStates?.(agentStates);
       return;
     }
     const event = parseEvent(raw);

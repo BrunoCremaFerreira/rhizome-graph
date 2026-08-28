@@ -1,9 +1,19 @@
 # Plan: Agent life cycle on camera -- waiting, leaving, lineage
 
-- **Status:** todo
+- **Status:** done
 - **Created:** 2026-08-26 20:56
-- **Implemented:** -- (date, and the branch it landed on)
-- **PR/commit:** --
+- **Implemented:** 2026-08-28, on branch `development`. R1-R9 built; R10-R13 remain noted, with
+  their triggers. **Step 0 was NOT run** -- it needs a real Claude Code session in a scratch
+  project, and hook changes only apply to sessions started afterwards, so no session can capture
+  its own. Its absence is handled rather than ignored: the tester's corrected specification puts
+  the four payload strings in module constants (`agentstate.EVENT_KEY`, `NOTIFICATION`, `STOP`,
+  `SUBAGENT_STOP`, and `hookinstall.LIFECYCLE_EVENTS`) and writes every test against those, so a
+  capture corrects four strings and changes no test. Row 2.4 -- is a permission prompt
+  distinguishable from an idle timeout -- is the one question that could not be deferred that
+  way, so it is deliberately not written rather than guessed, and `AgentState.caption` is
+  declared and filled by nothing.
+- **PR/commit:** -- (uncommitted in the working tree; per rule 3 the user decides what becomes
+  history)
 - **Consultations (mandatory):**
   - `software-architect` (2026-08-26) -- this document is its assessment and staged plan, and
     it names the owner of every RED/GREEN step below.
@@ -1370,3 +1380,139 @@ questions 0.7/0.8 is right and I would keep it.
 
 ---
 
+
+---
+
+## Implementation record (2026-08-28)
+
+Appended by the orchestrator after the work landed. The document above is the plan as written on
+2026-08-26 and is left unedited; this section is what actually happened, including where the plan
+was wrong.
+
+**The backend suite ran.** Section 0 records that it could not, and section 7 says "every backend
+statement in this document is from source, not from a green run". `pytest` was installed into
+`.venv` before any code was written, so every backend RED was confirmed to fail for its stated
+reason and every GREEN to pass. Baselines measured first: **1498 passed / 20 skipped** backend,
+**1403 passed / 51 files** frontend, **24 passed** for the opt-in `.deb` suite. Final: **1570 /
+20 skipped**, **1468 / 54 files**, **24 passed**, `tsc` and `vite build` clean. Note the frontend
+figure `CLAUDE.md` carried (1287) was already stale by 116 before this work, as the tester
+consultation says.
+
+**Four rows were built differently from the plan, each for a reason the plan did not have.**
+
+- **7.2 needed a production extraction the plan does not ask for.** `BEAM_LIFE_SECONDS` was
+  module-private in `renderer.ts`, which imports three.js and carries no unit test by doctrine, so
+  no vitest file could import it and a respelled `1.2` would have pinned nothing — the whole point
+  of the row being that the two constants must move together. `web/src/beams.ts` now owns
+  `BEAM_LIFE_SECONDS` and `READ_BEAM_LIFE_SECONDS`.
+- **8.3 needed the same.** `readMarker.OUTER_WIDTH` was private; it is exported now, and
+  `waitMarker.ts` imports it rather than respelling `0.05`.
+- **4.4 is a green jaw, not a RED.** The plan calls it a new case; `merge_hook_block` iterates the
+  *block's* keys, so a block that does not name `Notification` cannot touch a stranger's hook
+  there. It becomes a real case the moment 4.3 lands, which is what it now pins.
+- **4.2 was deleted rather than written**, per the tester consultation: it duplicated
+  `tests/test_capture_settings.py:89`. Those subset assertions were run instead and recorded green.
+
+**One existing test's premise expired, exactly where the plan predicted.**
+`tests/test_hook_install_model.py:676-685` asserted `merged["hooks"]["Stop"] == [stop]` under the
+docstring "a `Stop` hook is not in the array being merged". `hook_block` writes four keys now, so
+the premise is false while the *behaviour* is unchanged: `merge_hook_block` computes `kept + ours`
+and the stranger's entry survives byte for byte. The test was amended to assert that — content
+identity against a pristine copy, at index 0, so neither a drop nor a reorder behind ours can
+pass — under a docstring saying the premise moved rather than the assertion being loosened. The
+same stale premise appeared in one further docstring (`:267`) and was corrected there too.
+
+**Two behaviours were added that the plan does not specify, both in `EventHub`.** A `working`
+answer for an agent not already in `_agent_states` is dropped: publishing it would create a figure
+out of a payload that says nothing the agent's own events do not already say, and decision 5 only
+ever needs `working` to *clear* a wait. And an entry differing from the one held **only in its
+timestamp** is dropped before the dedupe can look at it — a notification repeated while the human
+is still away is one fact told twice, and a moving timestamp would defeat the dedupe entirely,
+every client paying for the whole picture again to be shown what it is already drawing. The
+consequence is that `ts` means *when this state began*, which is the honest answer to the question
+the browser asks of it. `setAgentStates` in the renderer takes the third of these: a `stopped`
+entry already past its departure window is skipped rather than built and torn down on the next
+frame, which is what a reconnect's replay of a long-dead agent would otherwise do.
+
+**The doctor's asymmetry is the shape the widening took.** `diagnose` looks for *our* command
+under every event key (so a rotted path under `Stop` is `STALE` rather than invisible) but counts
+a *stranger* only under `PostToolUse`. `FOREIGN` means a contest over our own capture array, not
+the mere presence of somebody else's hook, and a desktop notification bound to `Notification` is
+the likeliest thing a person already has — calling that a contest would teach somebody to ignore
+the next report. The partial-install blind spot the plan accepted is unchanged and is written into
+the `diagnose` docstring with its trigger.
+
+**The one packaging risk in section 7 is closed by measurement, not by judgement.** A real
+package was built and the fragment read back out of the archive: `/usr/share/doc/rhizome-graph/
+claude-settings.json` ships all four event keys with no change to `packaging/build-deb.sh`,
+because line 155 generates it from `hookinstall.hook_block()`. The opt-in suite is 24 passed,
+unchanged.
+
+**The daemon half was driven end to end**, against a live daemon over a scratch root, and the
+three claims that were arguments in this document are now observations: a blocked agent does not
+claim the disk change three seconds into its wait (R1); a `SubagentStop` with no `agent_id`
+broadcasts nothing and leaves the orchestrator standing (decision 7); a subagent's `Write` clears
+only its own wait (decision 5). Also confirmed: the dedupe holds a repeated notification off the
+wire with its timestamp unmoved, two subagents of one type are two entries, and a later client is
+replayed `meta, status, agentState` before the tree. The run is recorded in `CLAUDE.md` under
+Integration.
+
+**What is still unproven** is in `CLAUDE.md` under "Not yet verified, for the agent life cycle",
+and step 0 leads it: **no real `Notification` payload has ever existed** -- the probe above sent
+the shape this code assumes, which tests the daemon and not the assumption -- and no browser here
+can show what a broken ring looks like.
+
+### Post-implementation review (2026-08-28)
+
+`developer-tester` reviewed the landed code as a reviewer rather than as an author, answering "is
+this pinned?" **by mutation** — each mutant into a scratch copy of the tree, never into the working
+one — rather than by reading. Six findings, all six now pinned, three of which needed a production
+change. They are recorded here because three of them are about *this document's own* decisions
+interacting, which is the class of defect a plan cannot catch in advance.
+
+- **The wait marker's gaps were painted away by the caps, and the test could not see it.**
+  `paintWaitRing` sets `lineCap = "round"`, which extends every arc by `lineWidth / 2` at each end;
+  the gap assertion read `Math.abs(end - start)` off the `arc()` calls, so `ARC_FILL = 0.99` passed
+  all 17 tests **over a closed ring** — the continuous shape R8 exists not to be. The harness
+  recorded `lineCap` and nothing read it. Now the assertion measures the *painted* hole: declared
+  gap minus the cap extension at both bordering arcs, everything read off the recording and no
+  constant respelled. Today's constants leave 0.653 rad / 17.6 px against a 3.84 px stroke; the
+  mutant reports −0.12 rad.
+- **`parseAgentStates` admitted `agent: ""`.** `typeof agent === "string"` is true of the empty
+  string, so the entry entered `byAgent` under an empty key and, if `waiting`, earned a ring around
+  the actor `CLAUDE.md` says must never exist. The daemon cannot send one, and the parser is
+  precisely where that guarantee stops. Empty and blank now drop the entry alone. Deliberately
+  **not** duplicated in `agentState.ts`: that module re-validates nothing by design, and a second
+  identity rule is free to drift.
+- **Decision 5 and decision 9 collided, and neither said so.** The timestamp-only drop (added
+  during implementation, above) makes `ts` mean *when the wait began*, with no fresher stamp ever
+  arriving; `STALE_WAIT_SECONDS = 600` then retired the ring of an agent the daemon was still
+  reporting `waiting`. That is decision 5's own refusal — *a timeout reports false progress* —
+  reappearing in the browser, where decision 9 had put the clock precisely to avoid it. Staleness
+  is for an agent **killed** while blocked, not for a slow human, and `ts` cannot separate them, so
+  the page now names `LONGEST_HUMAN_ABSENCE_SECONDS` (8 h) and requires `STALE_WAIT_SECONDS`
+  strictly above it (12 h), with an anti-degeneracy jaw underneath. The relation is asserted; the
+  values are not.
+- **Three behaviours were correct and effectively unpinned.** `_record_agent_state`'s working-drop:
+  deleting it passed all 63 tests in the feature's own two files, failing only 11 in five unrelated
+  files that count frames for other reasons — so a refactor legitimately changing those counts
+  would have taken the guard with them. `set_agent_state`'s timestamp-drop: pinned by exactly one
+  test whose docstring is about the *encoded-frame* dedupe, so a reader tidying the guard away
+  would not connect the failure to it. And `diagnose`'s `command not in ours`: removing it left the
+  whole suite green, because every existing fixture uses a single event key — four keys run one
+  command, so `--doctor` would have printed it four times, in a report a human reads. Each now has
+  a test naming its own property, the doctor's with a jaw so the dedupe cannot become "keep the
+  first" and hide a rotted path behind a working one.
+- **`.claude/settings.json` was outside the language policy** — one level above the only `.claude`
+  tree `SCANNED_DIRS` names. Pre-existing, and this work added 17 lines of prose there. Fixed as a
+  `SCANNED_FILES` entry rather than a wider directory scan, because `.claude` also holds
+  machine-local untracked state and failing rule 4 on a developer's own file is the false alarm
+  that suite exists to avoid.
+
+Reported and **not** acted on, because it needs a decision rather than a fix: `docs/` is entirely
+outside the language policy, and `docs/features/done/2026-08-23-02-51-content-search.md` carries
+five hits — all of them English prose *quoting* the Unicode fixtures that plan is about, the same
+category as the `tests/` exemption. Bringing `docs/` into scope means either an exemption or
+rewriting an archived record, and `done/` is a historical archive. `tools/` and `setup.py` are
+unscanned too and clean today; `tools/read_burst.py` and `tools/webview_spike.py` print to a
+terminal, which is the surface rule 4 names.

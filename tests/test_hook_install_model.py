@@ -264,7 +264,17 @@ def test_settings_that_configure_other_things_are_absent() -> None:
 
 
 def test_hooks_for_other_events_alone_are_absent() -> None:
-    """`PreToolUse` and `Stop` are not the array a merge would touch."""
+    """`FOREIGN` is a contest over OUR capture array, not a hook anywhere.
+
+    It used to be "`Stop` is not an array a merge would touch", and that reason
+    is gone: `hook_block` writes four event keys now, so a merge does touch it.
+    The reason that replaced it is the one `diagnose` states -- ours is looked
+    for under every event key, and a *stranger* is counted only under
+    `PostToolUse`. A desktop notification bound to `Notification` is the
+    likeliest thing a person already has; it survives the merge byte for byte,
+    and calling it a contest would tell somebody their working setup is broken,
+    which teaches them to ignore the next report.
+    """
     text = json.dumps(
         {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}}
     )
@@ -674,15 +684,30 @@ def test_an_unrelated_post_tool_use_hook_survives_the_merge() -> None:
     assert FOREIGN_ENTRY in merged["hooks"]["PostToolUse"]
 
 
-def test_hooks_for_other_events_survive_the_merge() -> None:
-    """A `Stop` hook is not in the array being merged and must not notice one."""
+def test_a_strangers_stop_hook_survives_the_merge_that_now_writes_stop() -> None:
+    """A stranger keeps `Stop` when we start writing into `Stop` ourselves.
+
+    The premise moved under this test; the assertion was not loosened to fit it.
+    It used to read "a `Stop` hook is not in the array being merged", and it was
+    true while `hook_block` named `PostToolUse` alone -- so `== [stop]` said
+    something worth saying: that we never go near this key. `hook_block` now
+    names four (`PostToolUse` plus each of `LIFECYCLE_EVENTS`), so that equality
+    stopped describing a merge that never touches `Stop` and started denying a
+    merge that is supposed to.
+
+    The property underneath it is the one that was always load-bearing, and it
+    is pinned harder here than before: `merge_hook_block` is a merge and not a
+    write, so the stranger comes back byte for byte and still first, with our
+    entry appended beside it. Dropped, rewritten, or pushed in behind ours would
+    each fail this line, which `in` would not.
+    """
     module = hookinstall()
-    stop = {"hooks": [{"type": "command", "command": "notify-send done"}]}
-    settings = {"hooks": {"Stop": [stop], "PostToolUse": []}}
+    stranger = {"hooks": [{"type": "command", "command": "notify-send done"}]}
+    settings = {"hooks": {"Stop": [copy.deepcopy(stranger)], "PostToolUse": []}}
 
     merged = module.merge_hook_block(settings, module.hook_block(WORKING_COMMAND))
 
-    assert merged["hooks"]["Stop"] == [stop]
+    assert merged["hooks"]["Stop"][0] == stranger
 
 
 def test_settings_that_are_not_hooks_survive_the_merge() -> None:

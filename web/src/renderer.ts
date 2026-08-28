@@ -58,6 +58,18 @@ import {
 import { frameMatches, type SearchFrame } from "./search";
 import { createSearchMarkerCanvas } from "./searchMarker";
 import { createReadMarkerCanvas } from "./readMarker";
+// The two beam lifetimes live in a pure module because a constant declared
+// here cannot be imported by a test: `agentState.ts`'s DEPARTURE_SECONDS has
+// to outlive the longest beam, and that relation is asserted in vitest.
+import { BEAM_LIFE_SECONDS, READ_BEAM_LIFE_SECONDS } from "./beams";
+import { createWaitMarkerCanvas } from "./waitMarker";
+import {
+  createAgentStates,
+  departedAgents,
+  waitingAgents,
+  DEPARTURE_SECONDS,
+  type AgentStateModel,
+} from "./agentState";
 import {
   pickFile,
   hoverTarget,
@@ -99,6 +111,15 @@ interface ActorView {
   label: Sprite;
   /** Caption currently painted on `label`, so it is repainted only on change. */
   labelText: string;
+  /**
+   * The broken ring worn while this agent is blocked, built on first need.
+   *
+   * One sprite per actor rather than a shared pool, because the ring carries
+   * the ACTOR's own colour — two waiting agents cannot share a texture. Bounded
+   * by the actor map, which the departure below is the first mechanism ever to
+   * shrink.
+   */
+  waitRing: Sprite | null;
 }
 
 /**
@@ -137,7 +158,6 @@ interface ReadCandidate {
 }
 
 const MAX_BEAMS = 512;
-const BEAM_LIFE_SECONDS = 1.2;
 /** The neutral grey a directory dot wears, shared with the size mode's unmeasured nodes. */
 const DIR_COLOR = NEUTRAL_NODE_COLOR;
 
@@ -153,14 +173,6 @@ const READ_COLOR = 0xaa66ff;
 const READ_TINT = 0.75;
 /** Extra point size, in device pixels, at `reading === 1`. */
 const READ_SIZE_BOOST = 4;
-/**
- * Life of a read beam, in seconds — a fraction of {@link BEAM_LIFE_SECONDS}.
- *
- * Load-bearing, not taste. Reads arrive in bursts and {@link MAX_BEAMS} is a
- * fixed 512: read beams that lived as long as a write's would fill the buffer
- * and push the writes — the events the graph exists to show — out of it.
- */
-const READ_BEAM_LIFE_SECONDS = 0.6;
 /**
  * How many read rings can be on screen at once.
  *
@@ -179,6 +191,21 @@ const READ_PULSE_DEPTH = 0.22;
 const READ_MARKER_MIN = 0.02;
 /** Height of the agent figure in world units (a file dot is a few px wide). */
 const AVATAR_WORLD_HEIGHT = 7;
+/**
+ * The layout's pinned centre, where an agent that has done nothing yet stands.
+ *
+ * `layout.ts:24` spells it, and `sync` always keeps it live, so `position("")`
+ * always answers. An agent blocked on a permission prompt for its FIRST tool
+ * call has fired no `PostToolUse`, so it has no file to be placed on — and an
+ * actor with no position is hidden outright, which would leave the highest
+ * value half of the wait marker with nothing to paint on.
+ */
+const LAYOUT_ROOT_ID = "";
+/** Diameter of an agent's wait ring, in DEVICE pixels. */
+const WAIT_MARKER_PIXELS = 46;
+/** Radians per second of the wait ring's pulse, and its depth. */
+const WAIT_PULSE_RATE = 3;
+const WAIT_PULSE_DEPTH = 0.12;
 
 /**
  * Colour of a node the search matched.
@@ -357,6 +384,18 @@ export class GourceRenderer {
    * and every ramp evaluation happened once, when the measurement was adopted.
    */
   private sizeColors: ReadonlyMap<string, number> | null = null;
+  /**
+   * The daemon's picture of its own actors, as `agentState.ts` holds it.
+   *
+   * An ANSWER, like `sizeColors`: nothing here learns what a `Notification` is,
+   * what a `Stop` is, or that hooks exist. The two selectors are asked EVERY
+   * FRAME rather than once on adoption, because both are functions of `now` —
+   * a wait goes stale and a departure completes while no frame arrives at all.
+   */
+  private agentStates: AgentStateModel = createAgentStates();
+  /** Scratch for the two per-frame selector answers; cleared, never realloced. */
+  private readonly waitingNow = new Set<string>();
+  private readonly departingNow = new Set<string>();
   /** The active match's ring, in the MAIN scene: unlike text, it should glow. */
   private readonly searchMarker: Sprite;
   /** Scratch for the camera frame; refilled in place, never reallocated. */
@@ -670,6 +709,34 @@ export class GourceRenderer {
     this.sizeColors = colors;
   }
 
+  /**
+   * Who is working, who is blocked and who has just stopped.
+   *
+   * The `setSizeColors` shape: this takes an answer and never a question. It
+   * is handed the per-agent record and knows nothing about `Notification`,
+   * `Stop` or hooks — the classification happened in the daemon and the two
+   * time-based cuts belong to `agentState.ts`, where they carry tests.
+   *
+   * An agent named here that has never fired an event gets its figure NOW,
+   * standing at the layout's pinned centre: `PostToolUse` fires after a tool
+   * runs, so an agent blocked on a permission prompt for its first tool call
+   * has no file to be drawn on, and that is the commonest shape of exactly the
+   * situation the wait ring exists to show.
+   */
+  setAgentStates(state: AgentStateModel): void {
+    this.agentStates = state;
+    const now = Date.now() / 1000;
+    // A `stopped` entry the daemon keeps republishing after its window has
+    // closed must NOT get a figure: it would be built here and torn down by
+    // `updateActors` on the very next frame, so a reconnect's replay would cost
+    // two sprites and a canvas per agent that finished hours ago.
+    const departing = departedAgents(state, now);
+    for (const entry of state.byAgent.values()) {
+      if (entry.phase === "stopped" && !departing.includes(entry.agent)) continue;
+      this.ensureActor(entry.agent, entry.label);
+    }
+  }
+
   /** Register a discrete event for its visual effect (actor beam + flash). */
   onEvent(event: AgentEvent): void {
     // Seeded tree entries and unattributed filesystem changes have no actor, so
@@ -748,13 +815,14 @@ export class GourceRenderer {
    * a project that is gone, and the new tree arrives elsewhere.
    */
   resetScene(): void {
-    for (const actor of this.actors.values()) {
-      this.scene.remove(actor.figure);
-      disposeSprite(actor.figure);
-      this.overlayScene.remove(actor.label);
-      disposeSprite(actor.label);
-    }
+    for (const actor of this.actors.values()) this.removeActor(actor);
     this.actors.clear();
+    // The states describe actors of the project that was left; `main.ts` closes
+    // the model on the same reset, and this keeps the two from disagreeing for
+    // the frames in between.
+    this.agentStates = createAgentStates();
+    this.waitingNow.clear();
+    this.departingNow.clear();
     this.beams.length = 0;
     // The file that was open belonged to the old project; its highlight would
     // otherwise be waiting for a path the new tree may never have.
@@ -831,6 +899,7 @@ export class GourceRenderer {
     // After the labels: the rings are sized from the same per-frame metrics.
     this.updateSearchMarker();
     this.updateReadMarkers(model);
+    this.updateWaitRings();
 
     this.composer.render();
     // Text goes on top of the finished image, never through the bloom: keeping
@@ -964,11 +1033,54 @@ export class GourceRenderer {
   }
 
   private updateActors(dt: number): void {
+    // Wall clock, not `this.elapsed`: the daemon stamps `ts` with `time.time()`
+    // and both cuts are ages against it.
+    const now = Date.now() / 1000;
+    // Asked every frame, never once on adoption: a wait goes stale and a
+    // departure completes while no frame arrives at all, so an answer computed
+    // when the last one landed would be frozen. The two arrays the selectors
+    // return are bounded by the actor count -- a handful -- and the sets they
+    // are copied into are reused rather than reallocated.
+    this.waitingNow.clear();
+    for (const agent of waitingAgents(this.agentStates, now)) this.waitingNow.add(agent);
+    this.departingNow.clear();
+    for (const agent of departedAgents(this.agentStates, now)) this.departingNow.add(agent);
+
     for (const actor of this.actors.values()) {
+      const entry = this.agentStates.byAgent.get(actor.agent);
+      // An agent the daemon says has stopped and that the departure window has
+      // already let go of: the figure is gone, and this is the first mechanism
+      // in the program that ever removes one. Without it an afternoon of
+      // subagents ends as a field of dim strangers standing in front of the two
+      // that are working.
+      if (entry?.phase === "stopped" && !this.departingNow.has(actor.agent)) {
+        this.removeActor(actor);
+        continue;
+      }
+      // `?? 0` is load-bearing now, and must not be tidied into a non-null
+      // assertion: `this.actors` is the union of TWO inputs since
+      // `setAgentStates` can create a figure, so an actor the simulation has
+      // never seen an event for is an ordinary case rather than a bug.
       const intensity = this.sim.getActor(actor.agent)?.intensity ?? 0;
+      const waiting = this.waitingNow.has(actor.agent);
       // The figure never fades out entirely: an idle agent is still present and
-      // must stay findable, it just stops drawing attention.
-      const alpha = 0.4 + 0.6 * intensity;
+      // must stay findable, it just stops drawing attention. A BLOCKED agent is
+      // the one you most want to see, so the floor goes to 1 for it -- dimming
+      // it by idle decay is precisely backwards, and being idle is the whole of
+      // what it is reporting.
+      const alpha =
+        (waiting ? 1 : 0.4 + 0.6 * intensity) * this.departureFade(actor.agent, entry?.ts, now);
+      // An agent that has done nothing yet stands at the root of the tree: it
+      // is cheap, it is a true statement, and an actor with no position is
+      // hidden outright.
+      if (!actor.hasPos && entry) {
+        const root = this.layout.position(LAYOUT_ROOT_ID);
+        if (root) {
+          actor.x = root.x;
+          actor.y = root.y;
+          actor.hasPos = true;
+        }
+      }
       if (actor.hasPos) {
         actor.figure.position.set(actor.x, actor.y + AVATAR_WORLD_HEIGHT * 0.5, 2);
         actor.figure.visible = true;
@@ -993,6 +1105,67 @@ export class GourceRenderer {
           actor.hasPos = true;
         }
       }
+    }
+  }
+
+  /**
+   * How much of a departing figure is left, 1 while it is not departing.
+   *
+   * The fade rides ON TOP of the idle decay rather than replacing it: the decay
+   * stays the floor for every fact that never arrives -- a missed
+   * `SubagentStop`, a killed process, a hook that turns out not to fire. A fact
+   * retires a figure promptly; silence still only dims it, as it always did.
+   */
+  private departureFade(agent: string, ts: number | undefined, now: number): number {
+    if (!this.departingNow.has(agent) || ts === undefined) return 1;
+    const left = 1 - (now - ts) / DEPARTURE_SECONDS;
+    return left < 0 ? 0 : left > 1 ? 1 : left;
+  }
+
+  /** Retire one actor: the figure, the caption and the ring it may be wearing. */
+  private removeActor(actor: ActorView): void {
+    this.scene.remove(actor.figure);
+    disposeSprite(actor.figure);
+    this.overlayScene.remove(actor.label);
+    disposeSprite(actor.label);
+    if (actor.waitRing) {
+      this.scene.remove(actor.waitRing);
+      disposeSprite(actor.waitRing);
+      actor.waitRing = null;
+    }
+    this.actors.delete(actor.agent);
+  }
+
+  /**
+   * Ring every blocked agent, pulsing, at a constant size in PIXELS.
+   *
+   * Runs after `updateLabels`, like the read rings, because it is sized from
+   * the `worldPerPixel` that pass has just settled: the camera spans halfHeight
+   * 2..4000, so a ring sized in world units is sub-pixel with the tree framed
+   * and covers the screen on a single file. The sprite lives in the MAIN scene
+   * -- unlike text, a glow through the bloom is exactly what is wanted.
+   */
+  private updateWaitRings(): void {
+    for (const actor of this.actors.values()) {
+      const waiting = this.waitingNow.has(actor.agent) && actor.hasPos;
+      if (!waiting) {
+        if (actor.waitRing) actor.waitRing.visible = false;
+        continue;
+      }
+      // Built on first need, in the actor's own colour: the fact is about the
+      // agent, so with three figures on screen the ring says WHICH one is
+      // blocked without anybody reading a caption.
+      if (!actor.waitRing) {
+        actor.waitRing = makeWaitMarker(actor.color);
+        this.scene.add(actor.waitRing);
+      }
+      const pulse = 1 + WAIT_PULSE_DEPTH * Math.sin(this.elapsed * WAIT_PULSE_RATE);
+      const size = this.labelMetrics.worldPerPixel * WAIT_MARKER_PIXELS * pulse;
+      actor.waitRing.visible = true;
+      // On the figure, not on the ground under it, and just behind it in z.
+      actor.waitRing.position.set(actor.x, actor.y + AVATAR_WORLD_HEIGHT * 0.5, 1.5);
+      actor.waitRing.scale.set(size, size, 1);
+      (actor.waitRing.material as SpriteMaterial).opacity = 0.9;
     }
   }
 
@@ -1260,6 +1433,7 @@ export class GourceRenderer {
       figure,
       label: sprite,
       labelText,
+      waitRing: null,
     };
     this.actors.set(agent, view);
     return view;
@@ -1642,6 +1816,25 @@ function byReadingDesc(a: ReadCandidate, b: ReadCandidate): number {
  * Built once: all 24 sprites show the same shape in the same colour, and only
  * their position, scale and opacity change from frame to frame.
  */
+/**
+ * One wait ring, in one actor's colour.
+ *
+ * A texture per sprite rather than the read marker's single shared one: the
+ * colour IS the information here, so two waiting agents cannot share it.
+ */
+function makeWaitMarker(color: number): Sprite {
+  const texture = new CanvasTexture(createWaitMarkerCanvas(color));
+  // A 2D canvas hands us sRGB texels; left linear each arc's antialiased edge
+  // shifts gamma and thickens.
+  texture.colorSpace = SRGBColorSpace;
+  texture.minFilter = LinearFilter;
+  texture.magFilter = LinearFilter;
+  texture.generateMipmaps = false;
+  return new Sprite(
+    new SpriteMaterial({ map: texture, transparent: true, depthTest: false, opacity: 0 }),
+  );
+}
+
 function makeReadMarkerTexture(): CanvasTexture {
   const texture = new CanvasTexture(createReadMarkerCanvas(READ_COLOR));
   // A 2D canvas hands us sRGB texels; left linear the antialiased edge of each

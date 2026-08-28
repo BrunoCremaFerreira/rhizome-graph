@@ -13,6 +13,23 @@
     "Claude Code reads settings.json at session start, so a session already open",
     "when this file appears keeps running without it. Restart to pick it up."
   ],
+  "//lifecycle": [
+    "Notification, Stop and SubagentStop are not tool calls: they put an agent's",
+    "LIFE CYCLE on camera, as distinct from its file operations. A Notification",
+    "fires when Claude Code needs permission or has gone idle, and today a",
+    "blocked agent looks exactly like a thinking one -- one motionless figure.",
+    "Stop and SubagentStop are the facts that let an actor LEAVE; without them",
+    "there is only an inference from silence. They carry no matcher, because",
+    "they name no tool to match on.",
+    "The cost is one more Python process (about 40 ms, measured on this host) on",
+    "the agent's loop per firing. These three are cheap because their firing rate",
+    "is bounded by HUMAN actions -- a prompt, a turn, a subagent -- rather than",
+    "by tool calls, which run in the thousands. That is why these three are",
+    "installed and a matcher whose rate scales with the agent's work is a",
+    "different trade.",
+    "The session-start caveat above applies to these entries too: a session",
+    "already open keeps running without them."
+  ],
   "//debugging": [
     "RHIZOME_SOCKET overrides the ingest socket and must match the daemon.",
     "RHIZOME_DEBUG_LOG names a file to append hook FAILURES to -- the only",
@@ -25,6 +42,36 @@
     "PostToolUse": [
       {
         "matcher": "Write|Edit|MultiEdit|Bash|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/brn/projects/rhizome-graph/hooks/emit_event.py"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/brn/projects/rhizome-graph/hooks/emit_event.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/brn/projects/rhizome-graph/hooks/emit_event.py"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
         "hooks": [
           {
             "type": "command",

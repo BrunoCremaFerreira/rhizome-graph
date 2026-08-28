@@ -606,3 +606,116 @@ export function truncateMiddle(text: string, max: number): string {
 
   return text.slice(0, head) + ELISION + (tail > 0 ? text.slice(text.length - tail) : "");
 }
+
+/**
+ * What an agent is doing right now, as the daemon spells it on the wire.
+ *
+ * A closed set of three, and `working` is a VALUE rather than an absence: "the
+ * agent was waiting and is not any more" has to be sayable, or a frame deduped
+ * on its encoding could never report the end of a wait.
+ */
+export type AgentStateWord = "working" | "waiting" | "stopped";
+
+/** The three words, for runtime validation. Anything else degrades to `working`. */
+const AGENT_STATE_WORDS: ReadonlySet<string> = new Set<AgentStateWord>([
+  "working",
+  "waiting",
+  "stopped",
+]);
+
+/**
+ * One agent, exactly as the daemon reported it.
+ *
+ * Keeps the WIRE's word in `state`, the way {@link GitStatusEntry} does: the
+ * translation into the model's own vocabulary belongs to `agentState.ts`, so a
+ * parser stays a parser and holds no second opinion about what a phase is.
+ */
+export interface AgentStateEntry {
+  /** The actor key — identity, and the seed of the figure's colour. */
+  agent: string;
+  /** The readable agent type, for DISPLAY only; `""` for the orchestrator. */
+  label: string;
+  /** What the daemon says the agent is doing. */
+  state: AgentStateWord;
+  /** A short line about what it is doing, or `""` when the daemon sent none. */
+  caption: string;
+  /** Wall-clock seconds when the daemon last heard from this agent. */
+  ts: number;
+}
+
+/**
+ * The daemon's whole picture of its actors, pushed on the event socket.
+ *
+ * Cumulative, never a delta: what the frame does not name is not there. A delta
+ * would need an ordering guarantee across a reconnect and a rule for a client
+ * that missed one; a full picture in a deduped slot needs neither.
+ */
+export interface AgentStates {
+  /** The agents it knows about, in the order the daemon listed them. */
+  agents: AgentStateEntry[];
+}
+
+/**
+ * Validate and parse a raw WebSocket message into an {@link AgentStates}.
+ *
+ * Contract (see tests/agentStateProtocol.test.ts):
+ *   - `kind` must be exactly `"agentState"`, load-bearing in both directions
+ *     like {@link parseSizes}'s: an answer about actors routed as activity
+ *     would grow a node called "agentState" in the tree, and an activity event
+ *     mistaken for an answer would repaint every figure from one file save.
+ *   - THERE IS NO HARD FIELD BEYOND `kind`. A frame naming no agents is a real
+ *     answer — nobody is waiting, everybody has left — and dropping it would
+ *     leave the last picture's rings latched on figures the daemon has stopped
+ *     reporting.
+ *   - `agents` DEGRADES as `parseStatus`'s `entries` does: absent, `null` or
+ *     mistyped becomes `[]`, and a junk item is dropped ONE AT A TIME. An entry
+ *     needs a USABLE `agent` — a string that is not empty and not blank, since
+ *     it is the identity the whole model is keyed on and an empty one must
+ *     never create an actor — and a finite `ts` (staleness is computed from it, and a `NaN` compares
+ *     false against every cut, so such an entry would be neither fresh nor
+ *     stale — a ring nothing could ever retire). Either one missing drops that
+ *     entry ALONE.
+ *   - An unrecognised `state` degrades to `"working"` rather than dropping the
+ *     entry: a daemon one version newer naming a fourth phase still tells the
+ *     truth about who that agent IS and when it was last heard from.
+ *   - `label` and `caption` are display text and degrade to `""`. `caption` is
+ *     declared by this feature and filled by the sibling todo-caption one, so
+ *     its absence must cost nothing today.
+ *   - Order is preserved: it is the daemon's statement about its own actors,
+ *     and re-sorting here would be a second opinion held by the parser.
+ *   - NEVER throws: this comes off the network.
+ */
+export function parseAgentStates(raw: unknown): AgentStates | null {
+  if (!isRecord(raw)) return null;
+  if (raw.kind !== "agentState") return null;
+
+  const agents: AgentStateEntry[] = [];
+  if (Array.isArray(raw.agents)) {
+    for (const item of raw.agents) {
+      if (!isRecord(item)) continue;
+      const { agent, label, state, caption, ts } = item;
+      if (typeof agent !== "string") continue;
+      // An empty — or blank — agent never creates an actor: it would enter the
+      // model under an empty key and, if it said `waiting`, earn a ring on a
+      // figure nobody is behind. The daemon cannot name one either, since
+      // `normalize._usable_text` strips before `actor_of` answers. It does not
+      // send one today; this parser is where that guarantee stops, because what
+      // arrives here came off the network. Drops this entry ALONE, the way a
+      // non-finite `ts` does.
+      if (agent.trim() === "") continue;
+      if (!isFiniteNumber(ts)) continue;
+      agents.push({
+        agent,
+        label: typeof label === "string" ? label : "",
+        state:
+          typeof state === "string" && AGENT_STATE_WORDS.has(state)
+            ? (state as AgentStateWord)
+            : "working",
+        caption: typeof caption === "string" ? caption : "",
+        ts,
+      });
+    }
+  }
+
+  return { agents };
+}

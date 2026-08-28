@@ -65,6 +65,19 @@ SCANNED_FILES = (
     "CLAUDE.md",
     "README.md",
     "web/index.html",
+    # The hook block installed for THIS project, carrying the same `//`-prefixed
+    # rationale its template `config/settings.json` does -- and `config` is a
+    # scanned directory, so without this entry the two halves of one document
+    # were held to different rules.
+    #
+    # Named here, and deliberately NOT by widening SCANNED_DIRS to `.claude`:
+    # that directory also holds machine-local state a developer is free to keep
+    # (`settings.local.json`, and anything else untracked), and failing the
+    # repository's language policy on somebody's local file is a false alarm of
+    # exactly the kind this suite exists to avoid. Same shape as
+    # `web/index.html` above -- a file one level ABOVE a scanned tree, which
+    # recursing that tree never reaches.
+    ".claude/settings.json",
 )
 
 #: `""` is the suffix of `debian/control`, `debian/changelog` and every other
@@ -205,6 +218,35 @@ def test_the_page_shell_is_scanned() -> None:
     assert (REPO_ROOT / "web" / "index.html").resolve() in scanned, (
         "web/index.html is not being scanned: it is under no SCANNED_DIRS tree "
         "and named in no list of individually scanned files"
+    )
+
+
+def test_the_installed_hook_settings_are_scanned() -> None:
+    """`.claude/settings.json` is authored prose, and it sits outside the scan.
+
+    `SCANNED_DIRS` names `.claude/agents`, not `.claude`, so recursing it never
+    reaches the file beside that directory -- the same gap `web/index.html` fell
+    through, and for the same reason: a `.json` suffix in SCANNED_SUFFIXES only
+    ever applies to a file found under a scanned tree. Its template twin,
+    `config/settings.json`, IS scanned, so the two halves of one document are
+    held to different rules.
+
+    It is not a config file with a stray comment in it. The `//`-prefixed arrays
+    carry the rationale for every hook installed here -- why attribution needs
+    the block at all, why the life-cycle events are cheap, what the debugging
+    variables do -- which is exactly the authored text rule 4 covers, and it is
+    read by whoever opens the file to decide whether to copy it. The line-based
+    scan reads it the way it already reads `config/settings.json`: no JSON
+    parsing, so the prose arrays are ordinary lines.
+    """
+    settings = REPO_ROOT / ".claude" / "settings.json"
+    scanned = {path.resolve() for path in _scanned_files()}
+
+    assert settings.is_file(), f"{settings} is missing; this repository observes itself with it"
+    assert settings.resolve() in scanned, (
+        ".claude/settings.json is not being scanned: it is one level above the "
+        "only .claude tree SCANNED_DIRS names, and no list of individually "
+        "scanned files names it"
     )
 
 

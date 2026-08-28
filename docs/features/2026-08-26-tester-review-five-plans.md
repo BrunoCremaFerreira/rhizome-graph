@@ -6,7 +6,8 @@ The only files written were this review and one throwaway probe under the sessio
 
 Reviewed:
 
-1. `docs/features/todo/2026-08-26-20-56-agent-lifecycle-events.md`
+1. `docs/features/todo/2026-08-26-20-56-agent-lifecycle-events.md` (implemented 2026-08-28;
+   now `docs/features/done/2026-08-26-20-56-agent-lifecycle-events.md`)
 2. `docs/features/todo/2026-08-26-20-56-attention-rules.md`
 3. `docs/features/todo/2026-08-26-20-56-session-stats-panel.md`
 4. `docs/features/todo/2026-08-26-20-56-ambient-sound.md`

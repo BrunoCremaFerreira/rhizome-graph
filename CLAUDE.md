@@ -130,6 +130,7 @@ rhizome_graph/status.py     # pure parse of `git status --porcelain -z`, the fan
 rhizome_graph/file_view.py  # what a clicked file shows: diff, else text, else hex
 rhizome_graph/content_search.py # which files hold this string (forks nothing, imports no `re`)
 rhizome_graph/sizes.py      # how big is every file the graph draws (opens nothing, forks nothing)
+rhizome_graph/agentstate.py # pure: what a NON-tool-call payload says about its agent
 rhizome_graph/cli.py        # pure: argv + environ + cwd → frozen Settings; `rhi` itself
 rhizome_graph/assets.py     # pure: where THIS installation keeps web/dist, and the hook command
 rhizome_graph/ipc.py        # is that socket live? is that port free? (answers, never raises)
@@ -163,6 +164,9 @@ web/src/diffModel.ts        # pure: the unified diff, parsed into numbered rows
 web/src/fileDoc.ts          # pure: what the panel draws — rows, gutter, tokenize requests
 web/src/highlight.ts        # the ONE place that names shiki (lazy wasm + 22 literal imports)
 web/src/readMarker.ts       # the violet ring a file wears while an agent is reading it
+web/src/agentState.ts       # pure: who is waiting, who has left (both selectors take `now`)
+web/src/waitMarker.ts       # the BROKEN ring an agent wears while it is blocked on a human
+web/src/beams.ts            # pure: the two beam lifetimes, so a test can compare against them
 web/src/statusList.ts       # pure: the uncommitted-changes panel (order, cap, is it visible)
 web/src/searchKeys.ts       # pure: what ctrl+F / F3 / Esc mean (and what a SHIFTED ctrl+F is not)
 web/src/branding.ts         # pure: APP_NAME, so the untestable renderer never spells it
@@ -319,7 +323,7 @@ authored file here.
 
 Web MVP implemented and verified end-to-end (TDD).
 
-- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1498 pytest green with 20 skipped (1518
+- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1575 pytest green with 20 skipped (1595
   with `RHIZOME_PACKAGE_TESTS=1`, which opts into the slow builds — one wheel, one real `.deb`).
   Hook is stdlib-only and exits 0 on garbage input. Daemon seeds the project tree at boot,
   ingests hook events on a Unix socket, watches the filesystem, and serves `web/dist` over
@@ -730,7 +734,7 @@ Web MVP implemented and verified end-to-end (TDD).
     at all keeps its `.claude/` hidden, since the presence of the file is the switch — the
     answer to give first is the empty file, not a trigger on `.git`, which on this repository
     alone would draw 1 114 files of vendored Python.
-- **Frontend** (`web/`): 1287/1287 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
+- **Frontend** (`web/`): 1474/1474 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
   3.23.0 — 4.x needs Node ≥ 20 and this machine has 18) is the first runtime dependency added
   since `d3-force`; note that `npm install` under npm 10 strips the `libc` fields from
   `package-lock.json`, so check `git diff` on the lock after touching dependencies. Gource-style WebGL
@@ -977,6 +981,134 @@ Web MVP implemented and verified end-to-end (TDD).
     one grid whose two side reserves were measured in a browser, so a fourth box there would change
     what the centre caption may spend with nothing on screen saying so. Its gradient is built from
     `RAMP_STOPS`, never respelled in CSS.
+- **An agent's life is on camera now, not only its edits.** Three hook events join the five
+  tools: `Notification` (Claude Code needs permission, or has gone idle), `Stop` and
+  `SubagentStop`. They are not tool calls and they name no path, so nothing about them rides
+  the event wire — `rhizome_graph/agentstate.py` classifies the payload, the hub keeps one
+  `agentState` slot, and the browser gets the whole current picture per agent. The staged plan
+  is `docs/features/done/2026-08-26-20-56-agent-lifecycle-events.md`. Ten things are
+  load-bearing:
+  - **The three event names are ASSUMPTIONS, and they are constants for exactly that reason.**
+    Nothing in this repository has ever captured a `Notification`, `Stop` or `SubagentStop`
+    payload — the `PostToolUse` shape was "settled by capture, not by reasoning" and these were
+    not. So `agentstate.py` declares `EVENT_KEY`, `NOTIFICATION`, `STOP`, `SUBAGENT_STOP`, both
+    settings files and the installer read `LIFECYCLE_EVENTS`, and **every test is written
+    against the constants, never against the literals**: a real capture corrects four strings
+    and changes no test. The one question that could not be deferred this way is whether a
+    permission prompt is distinguishable from an idle timeout, so that test is not written at
+    all rather than guessed — see the outstanding-capture note below.
+  - **Only a tool call says who is at work.** `ingest_line` used to stamp `_last_hook` from
+    `actor_of(payload)` before it knew what the payload was, which cost nothing while only tool
+    calls arrived and inverts the moment these three do: an agent **blocked waiting for a
+    human** would become the author of whatever changed on disk in the next
+    `ATTRIBUTION_WINDOW_SECONDS`, very likely the editor of the human who is at that moment
+    reading the prompt — and a `Stop` would hand five seconds of changes to the agent that just
+    left. The gate is a pure `refreshes_actor` in `normalize.py`, beside `actor_of` and for the
+    same reason it is shared: the socket loop and the normalizer must not hold two opinions
+    about what a tool call is. It is keyed on a **usable `tool_name`**, so a `Grep` the
+    normalizer draws nothing for still stamps (a glob-expanding `cp` is still that agent's
+    doing) while `{"tool_name": 123}` does not.
+  - **It is a new frame KIND, not a fifth `EventType`.** `"W"` in `EVENT_TYPES` looks cheaper
+    and is wrong three times: `Event.path` becomes a mandatory field with no meaning, the
+    closed-set docstring exists precisely to stop the set being widened for convenience, and
+    `applyEvent` with `path: ""` reaches `touchFile("")` — where `""` is the layout's `ROOT_ID`,
+    the pinned centre every top-level node hangs from — growing **a phantom clickable file on
+    the origin of the graph**. The price is one more parser, one more route and one more sink;
+    obstacle 3 alone is worth it.
+  - **A slot, not a transient — because a read is a flash and a wait is a state.** The
+    mechanism is `set_status`'s, copied: the whole current picture rather than a delta (a delta
+    needs an ordering guarantee across a reconnect and a rule for a client that missed one),
+    deduped on the **encoded** message, cleared by `reset`, and placed in `replay_messages`
+    after the status and **before the seed** — `register` sends the replay in order and the
+    client draws as it arrives, so a waiting ring behind twenty thousand seed events appears
+    seconds late on a graph that has already settled. `_broadcast_transient` is the argument for
+    what it must not touch and *not* the mechanism: a client connecting one second after the
+    notification must be told, or it draws a working figure over a blocked agent.
+  - **`SubagentStop` requires an `agent_id`; `Notification` does not, and the asymmetry is the
+    point.** `actor_of` falls back to `session_id`, which is the **orchestrator's** key — so a
+    `SubagentStop` that fell back would retire the orchestrator's figure every time any
+    specialist finished, the figure most likely to still be working. It answers `None` instead,
+    and the feature degrades to "departure works for the orchestrator, via `Stop`": half the
+    value and never wrong. A `Notification` may fall back, because a permission prompt blocks
+    the session as a whole, so crediting it to the session is approximately true rather than
+    backwards.
+  - **A wait is cleared by the agent's own next tool call, never by a timer.** A human can be
+    away from the keyboard for an hour with the agent genuinely still blocked, so a timeout
+    reports *false progress* — a lie the user cannot detect. What a clock decides is only how an
+    **old** fact is drawn, and that lives in `agentState.ts` as a pure function of `(state,
+    now)`: no timer, no stored flag, testable with a number. Two refinements the plan did not
+    ask for and both are right: a `working` answer for an agent that was never blocked is
+    dropped (its events already say it is working, and publishing it would create a figure from
+    nothing), and an entry differing from the one held **only in its timestamp** is dropped
+    before the dedupe sees it — a notification repeated while the human is still away is one
+    fact told twice, and a moving timestamp would defeat the dedupe entirely. So `ts` means
+    *when this state began*, which is also the honest answer to the question the browser asks
+    of it.
+  - **An actor with no file event was invisible, and that was fatal to the best half.**
+    `PostToolUse` fires *after* a tool runs, so an agent blocked on the permission prompt for
+    its **first** tool call has fired no hook, has no `ActorView`, and `updateActors` hides any
+    actor whose `hasPos` is false. That is not an edge case, it is the commonest shape of the
+    exact situation this feature exists to show. `setAgentStates` therefore creates the figure
+    and places it at `layout.position("")` — the pinned centre, which `sync` always keeps live.
+    `renderer.actors` is now the union of two inputs, so the `?? 0` on `sim.getActor(...)` is
+    load-bearing and must not be tidied into a non-null assertion.
+  - **Nothing ever removed an actor before this.** `ACTOR_DECAY_PER_SEC` is a dimming, not a
+    departure: `alpha = 0.4 + 0.6 * intensity`, so after 12.5 s an idle figure sits at 40%
+    opacity **for the life of the page**, and an afternoon of subagents ends as a field of dim
+    strangers in front of the two that are working. `DEPARTURE_SECONDS = 2.5` is the first
+    mechanism that deletes one, and it is not free tuning: it must outlive the longest beam
+    (1.2 s) and a full write flash (~1.1 s), or a subagent that stops mid-flash vanishes and
+    orphans a lit beam claiming it as author. That relation is **asserted**, which is why
+    `BEAM_LIFE_SECONDS` had to leave `renderer.ts` for a pure `beams.ts` — a module that needs a
+    GL context cannot be imported by a test, and two literals in two files pin nothing. The
+    departure rides **on top of** the decay and does not replace it: the decay stays the floor
+    for every fact that never arrives.
+  - **The waiting marker is a SHAPE, not a sixth colour.** The page already spends five semantic
+    colours (add, modify, delete, read, search) and a sixth is where a colour vocabulary stops
+    being readable. So: a **broken ring** — arcs with gaps — against `searchMarker`'s one thick
+    continuous ring and `readMarker`'s two thin ones, painted in the actor's own
+    `hashColor("actor:" + agent)` so that with three agents on screen it says *which* one is
+    blocked without anybody reading a caption. The colour is an **argument** and never derived.
+    A known risk is inherited rather than discovered: a gap and a thin stroke are the same
+    artefact at low sampling, so a broken ring is *more* exposed to the fade-out `CLAUDE.md`
+    already flags for the read marker — hence the arcs are never thinner than `readMarker`'s
+    `OUTER_WIDTH`, now exported rather than respelled. While waiting, the alpha floor is lifted
+    to 1: a blocked agent is the one you most want to see, and dimming it by idle decay is
+    precisely backwards.
+  - **`ts` is when the state BEGAN, and that forces the staleness constant off a human scale.**
+    An entry differing from the one held only in its timestamp is dropped before the dedupe can
+    look at it, so no fresher stamp ever arrives for a fact that has not changed. Combine that
+    with a ten-minute staleness cut and a genuinely still-blocked agent loses its ring while the
+    daemon is still reporting it `waiting` — decision 5's own failure mode, *reporting false
+    progress*, relocated from the daemon to the browser. Staleness exists for an agent **killed**
+    while blocked, not for a slow human, and `ts` alone cannot tell the two apart, so the page
+    names `LONGEST_HUMAN_ABSENCE_SECONDS` (8 h: a lunch, a meeting, a night) and requires
+    `STALE_WAIT_SECONDS` strictly above it (12 h). **The relation is asserted and the values are
+    not**, with an anti-degeneracy jaw underneath — the absence must clear the hour the hub's own
+    docstring names, or the relation could be satisfied by declaring one second.
+  - **A `waiting` marker never gets a usable-looking agent it should not have.** `parseAgentStates`
+    required a `string`, which admits `""` — an entry that then enters the model under an empty
+    key and earns a ring around the actor `CLAUDE.md` says must never exist. The daemon cannot
+    send one (`_usable_text` strips before `actor_of` answers), and **the parser is exactly where
+    that guarantee stops**, because the frame came off the network. Empty and blank now drop the
+    entry alone, its neighbours surviving. A non-blank agent is *not* trimmed: the string is the
+    identity, and rewriting it would be the parser holding a second opinion about who is who —
+    which is also why `agentState.ts` re-validates nothing and `protocol.ts` owns the closed set.
+  - **The doctor learned to read the new keys, and the price of the cheap version is stated.**
+    `diagnose` read `PostToolUse` alone, so a rotted absolute path under `Stop` would error on
+    every agent stop while `rhi --doctor` reported `installed` — the rot `CLAUDE.md` says fails
+    louder and worse than absence, made invisible again. Now **ours** is looked for under every
+    event key while a **stranger** is still only counted under `PostToolUse`: `FOREIGN` means a
+    contest over our own capture array, not the mere presence of somebody else's hook, and a
+    desktop notification bound to `Notification` is the likeliest thing a person already has.
+    What this does **not** notice is a *partial* install — our command under `PostToolUse` and
+    absent under `Notification` still reads `installed`, and the symptom is a graph with no
+    waiting rings, which looks exactly like nobody being blocked. Trigger for the per-event
+    verdict: the first `--doctor` saying `installed` while the page shows no ring during a
+    session that was demonstrably blocked. The hook itself is **unchanged** — it forwards the
+    payload and classifies nothing, which is the whole reason a new matcher costs no hot-path
+    logic, only one more ~40 ms process per firing, and these three fire at a rate bounded by
+    *human* actions rather than by tool calls.
 - **Text is not part of the glow.** Labels live in a separate `overlayScene`, drawn after
   the composer with `autoClear = false`. Every glyph pixel clears the bloom's 0.05
   threshold, so a label left in the main scene gets an additive halo that closes the
@@ -1007,6 +1139,17 @@ Web MVP implemented and verified end-to-end (TDD).
   removal; committing everything empties the list (`repo: true`, no entries); switching the
   root to a subdirectory relativizes the paths to it and drops what is outside; a root outside
   any repository answers `repo: false`.
+  For the agent life cycle, against a live daemon over a scratch root, the daemon half of a path
+  that has never seen a real payload: a `Notification` with only a `session_id` broadcasts one
+  `agentState` naming the session `waiting`; the **same** notification again puts nothing on the
+  wire and leaves the timestamp at the first one's, which is what makes `ts` mean *when this state
+  began*; a second `Notification` carrying `agent_id` + `agent_type` yields **two** entries of one
+  type; a file changed on disk three seconds into that wait arrives with `agent: ""` -- the blocked
+  agent does not claim it, which is R1 proven rather than argued; a `Write` from the subagent turns
+  **only** its own entry `working` and leaves the session `waiting`; a `SubagentStop` with **no**
+  `agent_id` broadcasts nothing at all, so the orchestrator's figure survives a specialist
+  finishing; the same with an `agent_id` retires that one alone; and a client connecting afterwards
+  is replayed `meta, status, agentState` and *then* the tree, the position asserted by index.
   For the highlighter, the boundary that no unit test reaches was driven end to end outside the
   browser instead: the real `buildDoc → highlightChunks → applyTokens → buildDoc` path, over a
   real file and a real `git diff` from this repo, rendered both as ANSI and as HTML against the
@@ -1165,6 +1308,47 @@ so a file created while the mode is armed stays grey until F7 is pressed twice; 
 while the mode is armed, because a label texture is rasterised once when its slot binds to a path
 and recolouring means re-canvassing up to 48 sprites inside one frame, twice per F7 — the dot beside
 the name already carries the size, and the label's job is to say *which* file.
+
+**Not yet verified, for the agent life cycle — and here the gap is sharper than usual, because it
+is not only a screen that is missing.** Both suites are green, every pure decision is pinned, and
+the daemon half was driven end to end against a live daemon (above) — but **the three payload
+shapes have never been captured**, and this repository's own standard is
+that a hook payload is settled by capture, not by reasoning. Nothing has answered: whether
+`Notification` fires at all and carries `hook_event_name`; whether one raised for a *subagent's*
+tool call carries `agent_id` or only `session_id`; whether a permission prompt is distinguishable
+from an idle timeout by any field (this is why the plan's row 2.4 is deliberately **not written**
+rather than guessed, and why `AgentState.caption` is declared and filled by nothing); whether
+`SubagentStop` carries `agent_id` — **if it does not, the whole subagent half of departure is out
+of scope by the asymmetry above**; and whether `SubagentStop` fires once per subagent when two of
+the same type run in one turn, which is the assumption behind `Stop` retiring exactly one actor
+and never cascading. Running it needs a scratch project with `RHIZOME_TRACE_LOG` on all four
+matchers and one real session that gets blocked, goes idle, spawns two subagents of one type, and
+ends its turn; **hook changes only apply to sessions started afterwards, so no session can capture
+its own**. On each bad answer the plan says which step dies rather than the feature, and the
+constants make a correction a four-string edit.
+The visual half is the usual gap and this host is still a tty: whether a broken ring reads as
+"waiting" rather than as a selection, as damage or as decoration; whether an arbitrary `hashColor`
+actor colour is legible as a ring on a black field (if not, the ring takes a fixed light tint and
+the *shape* keeps doing the distinguishing — the fallback is written down so it is not re-argued);
+whether three arcs survive the sparse-sampling artefact the read marker already flags, the floor
+being set but its sufficiency being a real screen's answer; whether a figure standing at the
+layout's pinned centre reads as "this agent has not started yet" or as one stuck in the middle of
+the tree, which is the placement decision its author was least sure of; and whether a 2.5 s fade
+reads as leaving or as a glitch. `WAIT_MARKER_PIXELS`, the pulse rate and depth, and the ring's z
+are guesses nobody has looked at, and the two staleness constants are values the tests deliberately
+do not pin — they pin the relation between them, so retuning is free once somebody has watched a
+real session run long enough to reach either.
+
+Three findings from that plan are **noted and not built**, each with its trigger written down in
+`docs/features/done/2026-08-26-20-56-agent-lifecycle-events.md`: R11, **lineage** — a birth edge
+from parent to child, gated on whether a `Task` payload carries an id of the subagent it spawned
+or a subagent's own payload carries a parent id, because the only field plausibly on both sides is
+`agent_type` and joining on it is the rule this repository states twice ("never key an actor on
+the label"), while a wrong edge has no watcher to correct it and stays on screen forever; R12, that
+the actor map is still unbounded for an agent that never reports a `Stop` (a killed process, a
+crashed session), R7 having fixed only the common case; and R13, that nothing counts the blocked
+agents in *text* for a user whose camera is framed elsewhere — `#bottom-bar` is closed to it,
+because that row is one grid whose two side reserves were measured in a browser.
 
 Not yet built: per-repository grouping in the panel (R5 in
 `docs/features/done/2026-08-17-16-21-multi-repo-git-status.md` — the `repo` field exists on

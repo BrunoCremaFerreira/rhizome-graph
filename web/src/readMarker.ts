@@ -29,7 +29,15 @@ export const READ_MARKER_SIZE = 64;
  * quiet, sustained state, not the answer to a question the user typed.
  */
 const OUTER_RADIUS = 0.44;
-const OUTER_WIDTH = 0.05;
+/**
+ * Exported because {@link ./waitMarker} takes it as its stroke FLOOR.
+ *
+ * A broken ring is more exposed than a continuous one to sparse sampling at
+ * small sizes — a gap and a thin stroke are the same artefact there — so the
+ * wait marker's arcs are never thinner than this ring. Imported rather than
+ * respelled, so retuning this one moves the floor with it.
+ */
+export const OUTER_WIDTH = 0.05;
 const INNER_RADIUS = 0.3;
 const INNER_WIDTH = 0.035;
 

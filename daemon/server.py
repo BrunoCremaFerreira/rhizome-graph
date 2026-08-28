@@ -68,6 +68,12 @@ from websockets.asyncio.server import Server, ServerConnection, broadcast, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
+from rhizome_graph.agentstate import (
+    WORKING,
+    AgentState,
+    agent_state,
+    agent_state_frame,
+)
 from rhizome_graph.assets import WEB_DIST_ENV, default_web_dist
 from rhizome_graph.cli import (
     DEFAULT_HTTP_PORT,
@@ -86,6 +92,7 @@ from rhizome_graph.normalize import (
     actor_of,
     fs_event,
     normalize_event,
+    refreshes_actor,
     seed_event,
 )
 from rhizome_graph.paths import complete_dir, resolve_root
@@ -167,6 +174,13 @@ class EventHub:
         sharper version of the same reason: it is re-published every few seconds
         for the whole life of the session, so appended it would grow the replay
         without bound and eventually push the project's own tree out of it.
+      * ``_agent_states`` / ``_agent_state`` -- who is working, who is blocked on
+        a human and who has left, keyed on the actor id (never on the label, or
+        two specialists of one type collapse into one figure). A slot of the
+        same kind, rather than a transient, because a wait is a *state* and not
+        a flash: a client connecting a second after the notification must be
+        told, or it draws a working figure over a blocked agent and stays wrong
+        until the agent unblocks.
       * ``_reset`` -- the last "the observed project changed, clear everything"
         frame, in a replaceable slot like ``_meta`` (see :meth:`reset`).
       * ``_last_hook`` -- the actor that acted most recently, as
@@ -192,6 +206,8 @@ class EventHub:
         self._recent: deque[str] = deque(maxlen=buffer_size)
         self._meta: str | None = None
         self._status: str | None = None
+        self._agent_states: dict[str, AgentState] = {}
+        self._agent_state: str | None = None
         self._reset: str | None = None
         self._clients: set[ServerConnection] = set()
         self._attribution_window = attribution_window
@@ -213,12 +229,18 @@ class EventHub:
         first node appears; there is none until the daemon has looked at the
         repository. The status panel comes next, after the caption that names the
         project it belongs to and before the tree: painted first it would be a
-        list of changes with no project attached to them.
+        list of changes with no project attached to them. The agent states sit
+        with it, in the same group and for the same reason -- they are a fact
+        *about* the project, smaller and more perishable than the tree. They
+        cannot go after the seed: :meth:`register` sends this list in order and
+        the client draws as it arrives, so a waiting ring behind twenty thousand
+        seed events appears seconds late on a graph that has already settled.
         """
         reset = [self._reset] if self._reset is not None else []
         meta = [self._meta] if self._meta is not None else []
         status = [self._status] if self._status is not None else []
-        return [*reset, *meta, *status, *self._seed, *self._recent]
+        agents = [self._agent_state] if self._agent_state is not None else []
+        return [*reset, *meta, *status, *agents, *self._seed, *self._recent]
 
     async def register(self, websocket: ServerConnection) -> None:
         """Add a client and replay the tree plus recent activity."""
@@ -268,6 +290,45 @@ class EventHub:
         self._status = message
         broadcast(self._clients, message)
 
+    def set_agent_state(self, state: AgentState) -> None:
+        """Record what is true of one agent, and tell every client if it moved.
+
+        The mechanism is :meth:`set_status`'s, copied: one replaceable slot, the
+        whole current picture rather than a delta (a delta needs an ordering
+        guarantee across a reconnect and a rule for a client that missed one),
+        deduped on the *encoded* message because that is exactly what a client
+        would receive. It is a slot rather than a ring for the sharper version of
+        the same reason: this frame is republished for the life of the session,
+        so appended it would grow the replay without bound and eventually push
+        the project's own tree out of it.
+
+        Keyed on ``state.agent`` and never on ``state.label``: two subagents of
+        one type are two figures with two colours, and a dedupe by name would
+        collapse them into one.
+
+        An entry that differs from the one already held **only in its
+        timestamp** is dropped before the dedupe can even look at it. A
+        notification repeated while the human is still away is the same fact
+        told twice, and a timestamp that moved with every repeat would defeat
+        the dedupe entirely -- every client paying for the whole picture again
+        to be shown exactly what it is already drawing. The timestamp therefore
+        means *when this state began*, which is also the honest answer to the
+        question the browser asks of it: how long has this been true.
+        """
+        previous = self._agent_states.get(state.agent)
+        if previous is not None and dataclasses.replace(previous, ts=state.ts) == state:
+            return
+
+        self._agent_states[state.agent] = state
+        message = json.dumps(
+            agent_state_frame(list(self._agent_states.values())),
+            separators=(",", ":"),
+        )
+        if message == self._agent_state:
+            return
+        self._agent_state = message
+        broadcast(self._clients, message)
+
     def reset(self, project_root: str) -> None:
         """Point the hub at another project and forget the one before it.
 
@@ -289,6 +350,13 @@ class EventHub:
         clears the dedupe, which matters -- two projects can be dirty in exactly
         the same way, and the second one would otherwise never be announced.
 
+        ``_agent_states`` goes for the clearest version of the reason of all:
+        an actor is a figure standing in a *project*, so a waiting ring left
+        over from the root just abandoned reports somebody blocked on work that
+        is no longer on screen, and a `stopped` one retires a figure that never
+        arrived here. The slot goes with the dict, or the next client connecting
+        is replayed the old project's actors.
+
         The frame is kept in a slot of its own so a client connecting *after* the
         switch is told to clear too. Unlike :meth:`set_meta` this does not dedupe
         on the value: resetting to the same root is a request for a clean slate,
@@ -299,6 +367,8 @@ class EventHub:
         self._seed.clear()
         self._recent.clear()
         self._status = None
+        self._agent_states.clear()
+        self._agent_state = None
         self._last_hook = None
         self._hook_paths.clear()
         self._fs_paths.clear()
@@ -337,9 +407,16 @@ class EventHub:
         # Derived through `actor_of`, the same helper `normalize_event` uses, so
         # this path cannot credit a subagent's copies to the orchestrator while
         # the event it did produce carries the subagent.
+        #
+        # Only a *tool call* says who is at work, which is what `_last_hook` has
+        # always meant and what `_active_agent`'s docstring already claims it
+        # means. The payloads that are not tool calls are evidence of the
+        # opposite -- see `refreshes_actor`, where the whole argument lives.
         agent, label = actor_of(payload)
-        if agent:
+        if agent and refreshes_actor(payload):
             self._last_hook = (agent, label, self._clock())
+
+        self._record_agent_state(payload)
 
         event = normalize_event(
             payload,
@@ -379,6 +456,36 @@ class EventHub:
                 self._publish(event)
 
     # -- internals ---------------------------------------------------------
+
+    def _record_agent_state(self, payload: dict) -> None:
+        """Publish what this payload says about its agent, if it says anything.
+
+        The classification is :func:`rhizome_graph.agentstate.agent_state`'s and
+        none of it is repeated here: the hub owns state, that module owns what a
+        payload means. Everything it does not recognise -- which is every
+        payload the daemon hears today -- costs one dict lookup and returns.
+
+        A lifecycle fact never reaches :meth:`_publish`, and it is one step
+        further out than the read that :meth:`_broadcast_transient` exists for:
+        it names no path at all, so it has nothing to say to ``_known_paths``,
+        nothing for the watcher to echo through ``_hook_paths``, and nothing
+        worth replaying to a later client as a change.
+
+        A ``working`` answer only ever *clears* a wait: it updates an agent
+        already on camera and creates nobody. That is what decision 5 of the
+        plan asks for -- a wait is cleared by that agent's own next tool call and
+        never by a timer, because a human can be away from the keyboard for an
+        hour with the agent genuinely still blocked, and a timeout would report
+        false progress, which is a lie the user cannot detect. It also keeps the
+        frame quiet: an agent that has never been blocked has nothing to say
+        about itself that its events do not already say.
+        """
+        state = agent_state(payload)
+        if state is None:
+            return
+        if state.state == WORKING and state.agent not in self._agent_states:
+            return
+        self.set_agent_state(state)
 
     def _broadcast_transient(self, event: Event) -> None:
         """Show an event to whoever is watching now, and remember nothing of it.

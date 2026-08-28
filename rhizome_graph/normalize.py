@@ -118,6 +118,37 @@ def _usable_text(value: object) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
+def refreshes_actor(hook_json: object) -> bool:
+    """Is this payload proof that its agent was running a tool? Never raises.
+
+    The question :class:`daemon.server.EventHub` asks before recording who owns
+    the changes the watcher is about to report. It lives here, beside
+    :func:`actor_of`, for the reason that helper is shared at all: the ingest
+    loop and the normalizer must not hold two opinions about what a tool call
+    is. A condition inlined in the socket loop would be exactly that second
+    opinion, untestable without a socket.
+
+    Only a tool call counts, and the payloads that do not are not merely
+    uninteresting -- they are evidence of the opposite. An agent blocked on a
+    permission prompt is the one entity on the machine provably *not* writing
+    files, and the change on disk in the next few seconds is far more likely to
+    be the editor of the human who is at that moment reading the prompt; an
+    agent whose turn just ended has finished. Crediting either would be
+    attribution wrong in the worst available direction, and a confidently wrong
+    actor is worse than the empty one the watcher would otherwise carry.
+
+    Keyed on ``tool_name`` rather than on the event name on purpose, so it
+    degrades correctly if a payload shape turns out not to carry one -- and
+    keyed on *usable text*, so ``{"tool_name": 123}`` and ``{"tool_name": ""}``
+    are refused as firmly as an absent key. The tool the normalizer draws
+    nothing for still counts: a `find` or a glob-expanding `cp` yields no event
+    and its changes are still that agent's doing.
+    """
+    if not isinstance(hook_json, dict):
+        return False
+    return bool(_usable_text(hook_json.get("tool_name")))
+
+
 def normalize_event(
     hook_json: dict,
     known_paths: set[str] | None = None,
