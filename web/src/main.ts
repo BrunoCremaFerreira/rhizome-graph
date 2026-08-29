@@ -44,7 +44,7 @@ import {
   resetAttention,
   type AttentionState,
 } from "./attentionState";
-import type { AttentionRulesFrame } from "./protocol";
+import type { AttentionRulesFrame, SessionStatsFrame } from "./protocol";
 import { interpretFileViewKey } from "./fileViewKeys";
 import {
   applyTokens,
@@ -87,6 +87,8 @@ import {
   type SizeModeState,
 } from "./sizeMode";
 import { createSizeHud } from "./sizeHud";
+import { createStatsHud } from "./statsHud";
+import { interpretStatsKey } from "./statsKeys";
 import {
   activePath,
   closeSearch,
@@ -155,6 +157,8 @@ function boot(): void {
   const statusHud = statusEl ? createStatusHud(statusEl, openFile) : null;
   const sizeLegendEl = document.getElementById("size-legend");
   const sizeHud = sizeLegendEl ? createSizeHud(sizeLegendEl) : null;
+  const statsEl = document.getElementById("session-stats");
+  const statsHud = statsEl ? createStatsHud(statsEl) : null;
   const attentionEl = document.getElementById("attention");
   const attentionHud = attentionEl
     ? createAttentionHud(
@@ -166,6 +170,23 @@ function boot(): void {
         () => showAttention(acknowledgeAll(attention)),
       )
     : null;
+
+  /**
+   * The daemon's last per-agent table, and whether F8 has the panel open.
+   *
+   * Two variables and not one: the toggle is the reader's and the table is the
+   * daemon's, so a root switch drops the numbers without closing a panel the
+   * reader asked for. Everything else -- the order, the swatches, the cut and
+   * whether the panel is on screen at all -- is `statsPanel.ts`'s.
+   */
+  let stats: SessionStatsFrame | null = null;
+  let statsOpen = false;
+
+  function showStats(frame: SessionStatsFrame | null, open: boolean): void {
+    stats = frame;
+    statsOpen = open;
+    statsHud?.render(stats, statsOpen);
+  }
 
   // And the same shape for the alarms: `attentionState.ts` owns the latch, the
   // fold and the cap, `attentionList.ts` owns the rows and the header; this is
@@ -393,6 +414,12 @@ function boot(): void {
       // What is uncommitted right now. The frame is deduped by the daemon, so
       // this only fires when the working tree really changed.
       onStatus: (status) => statusHud?.render(status),
+      // What each agent has done this session. Counted by the daemon and pushed
+      // on a poll, because the browser's own history is the last 200 events
+      // plus the seed and nothing in the replay says how much was lost. The
+      // frame is deduped on the daemon side too, so an idle session repaints
+      // nothing.
+      onStats: (frame) => showStats(frame, statsOpen),
       onReset: () => {
         // The root changed: everything on screen belongs to the old project and
         // the new tree is already on its way.
@@ -418,6 +445,12 @@ function boot(): void {
         // The actors of the old project are not the new one's: a ring left
         // behind would sit on a figure standing over a tree it never touched.
         showAgentStates(closeAgentStates(agentStates));
+        // The table counts work done in a project the user has left, and unlike
+        // a stale alarm row it does not even look wrong -- a count is a number
+        // nobody can check by eye. The daemon resets its own counters on the
+        // switch and will republish, so `null` is "not told yet"; the toggle
+        // stays as the reader left it.
+        showStats(null, statsOpen);
         // The alarms name files of the old project, and the header describes a
         // rule file that governs a root nobody is watching any more. The
         // daemon republishes its rules for the new root, so `null` here is
@@ -458,6 +491,17 @@ function boot(): void {
       // key and a toggle back off both send nothing.
       if (shouldRequest(sizeMode, next)) client.send({ kind: "sizes" });
       showSizeMode(next);
+      return;
+    }
+
+    // F8 sits beside F7 for the same reason and on the same terms: it contests
+    // nothing, it is conditional on nothing, and the panel has to toggle with a
+    // modal open, with the root bar focused and with either search bar taking
+    // keystrokes. Unlike F7 it owes the daemon nothing -- the table arrives on
+    // a poll whether or not anyone is looking -- so this only paints.
+    if (interpretStatsKey(event)) {
+      event.preventDefault(); // Some browsers and window managers bind the F row.
+      showStats(stats, !statsOpen);
       return;
     }
 

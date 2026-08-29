@@ -16,6 +16,7 @@ import {
   parseRootError,
   parseSearchResult,
   parseSizes,
+  parseStats,
   parseStatus,
   type AgentEvent,
   type AgentStates,
@@ -27,6 +28,7 @@ import {
   type RootError,
   type RootReset,
   type SearchResult,
+  type SessionStatsFrame,
   type SizesResult,
 } from "./protocol";
 import { readToken, withToken } from "./token";
@@ -42,6 +44,7 @@ export type SearchResultSink = (result: SearchResult) => void;
 export type SizesSink = (sizes: SizesResult) => void;
 export type AgentStatesSink = (frame: AgentStates) => void;
 export type AttentionRulesSink = (frame: AttentionRulesFrame) => void;
+export type StatsSink = (frame: SessionStatsFrame) => void;
 
 export interface WsClientOptions {
   /** Backoff floor / ceiling in ms. */
@@ -102,6 +105,16 @@ export interface WsClientOptions {
    * graph — a node named after the rules ABOUT the tree, sitting in the tree.
    */
   readonly onAttentionRules?: AttentionRulesSink;
+  /**
+   * The per-agent summary of the session. Optional and consumed either way, for
+   * the same reason as the frames above, and here the fall-through is the
+   * sharpest of them: `parseEvent` ignores `kind`, so a table that ever grew a
+   * path-like field at its top level would grow a node called "stats" in the
+   * graph — and the poll republishes every few seconds, keeping it there
+   * forever. Note the one letter between this and {@link onStatus}: they are
+   * two different frames and each has its own branch below.
+   */
+  readonly onStats?: StatsSink;
 }
 
 /** Used only outside a browser (tests, SSR); real pages derive from location. */
@@ -156,6 +169,7 @@ export class WsClient {
   private readonly onSizes: SizesSink | undefined;
   private readonly onAgentStates: AgentStatesSink | undefined;
   private readonly onAttentionRules: AttentionRulesSink | undefined;
+  private readonly onStats: StatsSink | undefined;
 
   constructor(
     private readonly url: string,
@@ -174,6 +188,7 @@ export class WsClient {
     this.onSizes = options.onSizes;
     this.onAgentStates = options.onAgentStates;
     this.onAttentionRules = options.onAttentionRules;
+    this.onStats = options.onStats;
     this.delay = this.minDelay;
   }
 
@@ -317,6 +332,17 @@ export class WsClient {
     const attentionRules = parseAttentionRules(raw);
     if (attentionRules) {
       this.onAttentionRules?.(attentionRules);
+      return;
+    }
+    // Before `parseEvent` like every frame above, and consumed with or without
+    // a sink: the session summary is an answer ABOUT what agents did, not a
+    // change any of them made. `parseEvent` ignores `kind`, so only this
+    // ordering keeps the table out of the simulation — routed as activity it
+    // would grow a node called "stats" in the graph, and the poll repeats every
+    // few seconds, putting it back forever.
+    const stats = parseStats(raw);
+    if (stats) {
+      this.onStats?.(stats);
       return;
     }
     const event = parseEvent(raw);

@@ -131,6 +131,7 @@ rhizome_graph/file_view.py  # what a clicked file shows: diff, else text, else h
 rhizome_graph/content_search.py # which files hold this string (forks nothing, imports no `re`)
 rhizome_graph/sizes.py      # how big is every file the graph draws (opens nothing, forks nothing)
 rhizome_graph/agentstate.py # pure: what a NON-tool-call payload says about its agent
+rhizome_graph/session_stats.py # pure: what each agent did this session (counts, capped)
 rhizome_graph/attention.py  # pure-ish: the paths the user asked to be told about (one file, read once)
 rhizome_graph/cli.py        # pure: argv + environ + cwd → frozen Settings; `rhi` itself
 rhizome_graph/assets.py     # pure: where THIS installation keeps web/dist, and the hook command
@@ -155,6 +156,8 @@ web/src/contentSearchKeys.ts # pure: what ctrl+shift+F / Enter / F3 / Esc mean
 web/src/sizeColor.ts        # pure: the no-green ramp, the median-hinged scale, the byte format
 web/src/sizeMode.ts         # pure: the F7 round trip (phases, late-answer refusal, the colours)
 web/src/sizeKeys.ts         # pure: what F7 means (and what a modified or repeating F7 is not)
+web/src/statsPanel.ts       # pure: the session summary's rows (order, swatch, cap, visibility)
+web/src/statsKeys.ts        # pure: what F8 means (and what a modified or repeating F8 is not)
 web/src/rootPrompt.ts       # pure: the ctrl+L bar's state (text, completion, discard on Esc)
 web/src/pick.ts             # pure: which file a click (or the resting pointer) landed on
 web/src/labels.ts           # pure: label size/placement, and which files are named this frame
@@ -178,7 +181,7 @@ web/src/branding.ts         # pure: APP_NAME, so the untestable renderer never s
 web/src/token.ts            # pure: read the control token, stamp it on a command frame
 web/src/*Hud.ts             # thin DOM painters: context caption, event list, attribution, search
                             # box, content-search box, git status panel, size legend,
-                            # attention panel
+                            # attention panel, session summary
 setup.py / MANIFEST.in      # the ONLY dynamic build step: copy web/dist in, IF it was built
 run.sh / start.sh           # minimal launcher / full bootstrap
 ```
@@ -329,7 +332,7 @@ authored file here.
 
 Web MVP implemented and verified end-to-end (TDD).
 
-- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1641 pytest green with 20 skipped (1661
+- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1745 pytest green with 20 skipped (1765
   with `RHIZOME_PACKAGE_TESTS=1`, which opts into the slow builds — one wheel, one real `.deb`).
   Hook is stdlib-only and exits 0 on garbage input. Daemon seeds the project tree at boot,
   ingests hook events on a Unix socket, watches the filesystem, and serves `web/dist` over
@@ -740,7 +743,7 @@ Web MVP implemented and verified end-to-end (TDD).
     at all keeps its `.claude/` hidden, since the presence of the file is the switch — the
     answer to give first is the empty file, not a trigger on `.git`, which on this repository
     alone would draw 1 114 files of vendored Python.
-- **Frontend** (`web/`): 1649/1649 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
+- **Frontend** (`web/`): 1768/1768 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
   3.23.0 — 4.x needs Node ≥ 20 and this machine has 18) is the first runtime dependency added
   since `d3-force`; note that `npm install` under npm 10 strips the `libc` fields from
   `package-lock.json`, so check `git diff` on the lock after touching dependencies. Gource-style WebGL
@@ -1242,6 +1245,109 @@ Web MVP implemented and verified end-to-end (TDD).
     `MAX_RULES_PER_FILE` is 1000, and 1000 rules is ~320 us per event by linear extrapolation,
     ten times today's whole per-event path. So `MAX_ATTENTION_RULES` is **64**: a rule file with
     more than 64 patterns is not a supervision policy, it is a second `.gitignore`.
+- **F8 says what each agent actually did this session.** One row per agent: distinct files
+  touched, reads against writes, the file it returned to most, how many directories it worked
+  in, and the span between the first and last moment it was seen. The staged plan is
+  `docs/features/done/2026-08-26-20-56-session-stats-panel.md`. Ten things are load-bearing:
+  - **The counting is DAEMON-side, and that is the decision the whole feature turns on.** The
+    browser cannot count what it was never shown: a client is replayed `reset`, `meta`,
+    `status`, the seed and the last **200** events, and nothing in the replay marks the loss.
+    A browser-side counter is therefore not merely approximate, it is **silently** approximate,
+    and two tabs opened five minutes apart disagree about the same session with no way for
+    either to know. A panel whose numbers depend on when you opened the tab is not a summary.
+    The security audit recommended the browser side and this went the other way deliberately;
+    the argument is written down in decision 2 of the plan.
+  - **It hangs off `_observe`, the seam the attention rules already built,** and adds no second
+    hook point. Both fan-out paths come through that one method, so a later "reads should not
+    count" or "deletions count double" cannot land in one of them and not the other -- the
+    symptom of which would be a total that is right for hook events and wrong for watcher ones,
+    invisible to any single test.
+  - **The seed exemption is structural, inherited rather than re-argued.** `seed_paths` builds
+    its own message and never touches `_observe`, so the counters are never offered a seed
+    event at all and `session_stats.py` deliberately does **not** filter for one -- a filter
+    there would hide a wiring mistake instead of failing on it. **12 524 phantom "files
+    touched" on this host's home directory is what that buys**, and a test guards the obvious
+    "consistency" refactor that would route the seed through it.
+  - **Reads are counted, kept apart from writes, and never summed.** `eventLog.ts` drops `R`
+    outright because that list is a list of *changes*; this panel inverts that on purpose --
+    "it read 340 files and wrote 12" is the single most informative line it produces, and an
+    agent filtered out for having written nothing is an agent that spent the session reading
+    and vanished from the report of it. The inversion is in the module docstring, or the next
+    reader folds it back into `eventLog`'s rule. `D` counts as a write; `A` and `M` are not
+    distinguished, because that is already the graph's own colour.
+  - **A poll in a slot, not a publish per event.** The counters move on every event; the frame
+    does not have to. Per event it would be a fresh `json.dumps` and a broadcast to every
+    client for every keystroke of an agent's work. So: a task of its own on
+    `STATS_POLL_INTERVAL_SECONDS` (5 s, or `RHIZOME_STATS_INTERVAL`, or `--stats-interval`;
+    <= 0 disables it and creates no task), deduped on the **encoded** string in a replaceable
+    slot exactly as `_status` is -- and here the dedupe is what makes the poll affordable, since
+    an idle session frames a byte-identical table every 5 s for hours. The panel is up to 5 s
+    behind, which is the opposite trade from the recent-changes list beside it; that one is
+    instant and lossy. **Two panels on one page with opposite freshness guarantees is a real
+    inconsistency**, and what makes it survivable is that this one is a summary.
+  - **`publish_stats` needs no root check, and that asymmetry is the point.** `publish_status`
+    re-reads `self.root` after its await and drops an answer about an abandoned root, because
+    its fork outlives the read. Nothing here forks or awaits, so nothing can be overtaken by a
+    `ctrl+L`; what answers the switch is `EventHub.reset` emptying the counters synchronously,
+    before the new project's first event arrives. The in-flight flag is still set and cleared,
+    so the first `await` added is already covered rather than having to be remembered.
+  - **The key is `agent`, the text is `label`, and the empty agent gets a row.** `CLAUDE.md`'s
+    "an event with `agent: \"\"` must never create an actor" is about a figure and a beam; a
+    stats row is neither. An unattributed change is real work by nobody on camera, and hiding
+    it would make the totals not add up -- so it gets **one** row, sorted **last regardless of
+    its counts**, carrying **no swatch**, because the swatch is the actor's identity and there
+    is no actor. Getting this wrong in either direction is the likeliest misreading this
+    feature invites, so it is a test rather than a comment. **The frame's order is not the
+    panel's**: the daemon sorts by writes descending, and "unattributed last" is the browser's
+    sort alone.
+  - **Every counter is capped, and the most-visited answer degrades rather than lying.**
+    `MAX_AGENTS` 32, `MAX_TRACKED_PATHS` 2 000 per agent, and the rule at the cap is **stop
+    adding new keys, keep incrementing existing ones**, then set `truncated`. Under it the
+    most-visited file is exact whenever the winner appeared among the first 2 000 distinct
+    paths -- overwhelmingly likely for a file an agent returns to, and **not** guaranteed. LRU
+    eviction was rejected for the sharper reason: it can evict the winner and makes the answer
+    wrong *without saying so*. The per-path map is a `dict[str, int]` whose length **is** the
+    distinct-file count, because two counters that must agree are two counters that can drift.
+  - **F8, not `Tab`, and the refusal has three separate costs behind it.** `Tab` is focus
+    traversal across four focusable things, and vitest here is `environment: "node"` with no
+    jsdom, so **no test on this host could catch** a binding that took it away; `Tab` is
+    already claimed conditionally by `interpretRootKey`, so a stats binding would have to be
+    conditional on another box's state; and to be unconditional it would have to read
+    `document.activeElement`, putting a raw DOM read into the composition root. F8 costs none
+    of that and sits beside F7 at the top of the chain for `sizeKeys.ts`'s own stated reason --
+    a binding that contests nothing takes no part in an argument about contested keys.
+    `interpretStatsKey` declines every modified and every **repeating** F8: held down it
+    repeats at ~30 Hz, and a panel flickering at 30 Hz is its own defect. **Escape does not
+    close it** -- Escape is contested three ways already, and this is a corner overlay rather
+    than a cover, so it needs no escape hatch. A second F8 closes it.
+  - **It reports FIRST and LAST and refuses "time active".** `last - first` calls an agent that
+    worked ten seconds and idled an hour "active for an hour". The honest version needs a gap
+    threshold, and the only interval in this codebase that resembles one is
+    `ATTRIBUTION_WINDOW_SECONDS`, which means something else entirely -- borrowing it would be
+    a number chosen because it existed. So the panel prints both timestamps and the elapsed
+    span, **labelled as a span and not as activity**. The reader does the arithmetic, and the
+    span over-reports for an idle agent; stated on screen rather than hidden.
+- **The top-right corner is a column now, and that is what keeps a summary off an alarm.**
+  `#session-stats` is the second child of `#top-right-column`, with `#size-legend` first;
+  `#attention` is untouched. The placement was re-decided during implementation because the
+  plan's premise had expired -- it says "top-left is the only free corner", which stopped being
+  true the moment the attention panel shipped there. The argument that replaced it is
+  geometric, which is what made it decidable on a tty: `#attention` is `left:14px;
+  max-width:32vw` so its right edge is at most `14px + 32vw`, a right-anchored `max-width:32vw`
+  box's left edge is at least `68vw - 14px`, and the two can meet only below a **78 px
+  viewport**. So "a summary the user opened must never cover an alarm the user did not ask
+  for" is settled by the stylesheet rather than by a rule someone has to remember. A second box
+  merely *pinned* near the legend was refused: `#size-legend` has **no `max-height`** and its
+  error row is a daemon-supplied string, so any `top:` offset below it is a guess about a
+  height nothing bounds, and sharing `top:14px; right:14px` is a deterministic total overlap
+  for as long as F7 is armed. The legend is first because the box that has always owned the
+  corner does not move; it lost exactly three declarations to the wrapper and kept everything
+  else, including the `[hidden] { display: none }` that collapses the flex child **and** its
+  gap. `pointer-events: none` on the column and `auto` on the scrolling list, `#attention`'s
+  exact pair: `none` on both makes 45vh of rows unscrollable, `auto` on the box eats every drag
+  across 32vw x 45vh. The wrapper sits where the legend used to, before `#file-view`, because
+  **the stylesheet declares no `z-index` anywhere** -- paint order here is source order, and
+  that premise is now asserted by a test.
 - **Text is not part of the glow.** Labels live in a separate `overlayScene`, drawn after
   the composer with `autoClear = false`. Every glyph pixel clears the bloom's 0.05
   threshold, so a label left in the main scene gets an additive halo that closes the
@@ -1262,7 +1368,8 @@ Web MVP implemented and verified end-to-end (TDD).
   `agent_type`; a read of a file outside the root produces no event at all; a `Write` after a
   `Read` of the same path is still an `A`; and no `R` survives in the replay handed to a
   client that connects afterwards, while the real write does. Also: tree seeded on connect; a Write flashes
-  once across both channels; `cp *.md docs/` reports each file actually copied, credited to
+  once across both channels **when the hook wins the race, which the session-stats verification
+  found is not the usual case -- see "One edit, two events" below**; `cp *.md docs/` reports each file actually copied, credited to
   the agent; `rm -rf docs/` prunes the subtree; a non-agent edit appears with no actor; the
   meta frame arrives first and a branch switch is pushed without reconnecting; real captured
   hook payloads replayed through the daemon yield two distinct actors, the subagent's carrying
@@ -1283,6 +1390,22 @@ Web MVP implemented and verified end-to-end (TDD).
   `agent_id` broadcasts nothing at all, so the orchestrator's figure survives a specialist
   finishing; the same with an `agent_id` retires that one alone; and a client connecting afterwards
   is replayed `meta, status, agentState` and *then* the tree, the position asserted by index.
+  For the session-stats panel, against a live daemon over scratch roots, with real hook payloads
+  on the real ingest socket: a client connecting to a daemon that has counted something is
+  replayed `meta, status, agentState, attention, stats` and *then* the tree, the position
+  asserted by index; a root of 41 files seeds 41 events and the first `stats` frame is still
+  `{"agents":[]}` -- the boot snapshot is not work, structurally rather than by a filter; a
+  subagent's `Write` produces a row keyed on its `agent_id` and labelled with its `agent_type`;
+  a `Read` raises `reads` and not `writes`, while the same path is still an `A` when written
+  afterwards and no `R` survives in a later client's replay; two subagents of one `agent_type`
+  stay two rows; a disk change with no hook ever fired lands on the `agent: ""` row rather than
+  being dropped; a 0.5 s poll over an idle session puts nothing further on the wire for five
+  ticks and exactly one frame for one event; a `setRoot` resets every client and empties the
+  table, and a client connecting afterwards is replayed `agents: []` and never the old
+  project's numbers; `--stats-interval 0` creates no poll at all while the page is still
+  served; and every frame checks field-for-field against `parseStats`'s contract, `dirs`
+  crossing as an `int` -- the `set` hazard the module docstring names is genuinely closed,
+  since a `set` would have reached no client at all.
   For the highlighter, the boundary that no unit test reaches was driven end to end outside the
   browser instead: the real `buildDoc → highlightChunks → applyTokens → buildDoc` path, over a
   real file and a real `git diff` from this repo, rendered both as ANSI and as HTML against the
@@ -1353,7 +1476,8 @@ headless host, `--doctor` to check the hooks without starting anything, `--insta
 write them, `--attention-rules PATH` (or `RHIZOME_ATTENTION`) to name the file declaring which
 paths deserve a second look — by default `<observed root>/.rhizome-attention`, in git's own
 pattern syntax, absent by default and refused loudly when an explicit path names no readable
-file. Run, from a checkout: `RHIZOME_PROJECT_ROOT=/path/to/observed ./start.sh`. Point
+file. `--stats-interval SECONDS` (or `RHIZOME_STATS_INTERVAL`) paces the session-summary poll
+behind F8, 5 s by default and `<= 0` to switch it off entirely. Run, from a checkout: `RHIZOME_PROJECT_ROOT=/path/to/observed ./start.sh`. Point
 the root at the project you want to *watch*, not at `rhizome-graph` — or start anywhere and
 switch with `ctrl+L` in the page (the switch is global: one daemon watches one root, so every
 viewer follows). Install attribution with `rhi --install-hooks`, which never writes without
@@ -1535,6 +1659,74 @@ kept that way deliberately, and the shape that would avoid the whole question is
 **no pattern**, only a path already on the graph, which `resolve_inside` already contains. And
 the pre-existing R12/rootError case: a refused command is painted in the observed-root bar, which
 this feature adds no sixth instance of, because it adds no command.
+
+**One edit, two events -- a pre-existing defect the session-stats panel makes permanent.** The
+dedupe between the two capture sources is **one-directional**: `ingest_fs_change` skips a path
+`_recently_hooked` says a hook just reported, but `ingest_line` stamps `_hook_paths` and
+publishes unconditionally, never consulting `_fs_paths`. So the suppression only works when the
+**hook arrives first** -- and it usually does not. `PostToolUse` fires *after* the tool ran, so
+the file is already on disk when the hook process starts, and that process is a ~40-56 ms spawn.
+Driven through the real `hooks/emit_event.py`, three edits by one agent produced **six** events
+and a table reading `writes: 5` for that agent plus a phantom `agent: ""` row carrying the
+first edit -- the watcher's `A`, credited to `_active_agent()` (the *previous* agent, or nobody
+at the start of a session), followed by the hook's `M`, which is an `M` because the watcher's
+publish already put the path in `known_paths`. At a 0 ms gap the hook wins and one event
+appears; at 40 ms and at 150 ms the watcher wins and two do.
+
+**This is not a regression, and the counters are faithful.** The same probe against an archive
+of `HEAD` -- none of this feature's code -- produces two events for a new file *and* for an
+existing one, so `_observe` is counting exactly what the hub fans out. What changed is the
+consequence: a transient double flash, which nobody could count, is now a quantified
+`writes: 5` for three edits that sits on screen. **The panel's `writes` is a count of events,
+not of edits**, and the first row of a session may be a phantom. The fix belongs upstream in
+the hook/watcher dedupe -- a RED test for `ingest_fs_change`, most likely a reverse suppression
+keyed on `_fs_paths` within the coalesce window, plus a rule for the `A`-then-`M` inversion --
+and the counters would need no change at all. It is recorded here rather than fixed because it
+is older than this feature, wider than it, and touches the attribution path that
+`CLAUDE.md` warns is the hard part.
+
+**Not yet verified, for the session statistics panel.** Both suites are green -- backend 1745,
+frontend 1768 -- and every pure decision is pinned, but this host is a tty and **nothing here
+has been on a screen**. Whether the top-right column reads as one corner or as two boxes
+stacked. Whether 20 agent rows in a 45vh box is a panel or a wall. Whether a row's three lines
+survive `max-width: 32vw` with a long agent id and a long path. Whether the `truncated` caveat
+reads as informative or as clutter -- "files touched: 2 000" with the flag set is a **floor**,
+not a count, and a reader who misses the flag has a wrong number. Whether the panel and `#log`
+meet at a short viewport, and whether the column meets the centred search bars at a narrow one.
+And, sharpest because no test can reach it at all: **whether `#size-legend` renders
+pixel-for-pixel as it did before it was wrapped** -- the wrapper carries no padding, border,
+margin or background precisely so that it does, and that is an instruction, not an assertion.
+
+Nor is any of it measured against a real session. The daemon-side per-event cost is an
+**estimate**: 2.17 us is the *browser's* accumulator measured in Node 18 on this host, and the
+Python equivalent was asserted to be of the same order rather than shown. `MAX_TRACKED_PATHS`
+(2 000), `MAX_AGENTS` (32), `statsPanel.DEFAULT_MAX_ROWS` (20) and the 5 s poll interval are all
+pinned guesses -- no session here has been long enough to reach any of them, and nothing
+measured the interval against how often a reader actually looks. `DEFAULT_MAX_ROWS` is
+deliberately **not** 32: that is the daemon's `MAX_AGENTS`, and two constants that merely happen
+to be equal is the failure this file names elsewhere.
+
+**F8 ships undiscoverable, and that is the single largest known cost of this feature.** R9 of
+its plan is the legend entry, and it **cannot be closed on this host**: adding
+`" - F8: session stats"` grows the shortcut legend from 162 to 182 characters, a 12% growth in
+the widest thing in `#bottom-bar`, and `CONTEXT_WIDTH_FRACTION = 0.34` is a *browser
+measurement* against exactly that 162-character string at 1280 and 1600. What was built instead
+is a jaw in `tests/test_bottom_row_width_bounds.py` pinning the legend at exactly 162
+characters -- passing today on purpose, its docstring saying the number may only be changed by
+re-measuring in a browser and writing the new one down with the date. It converts "somebody
+will remember to re-measure" into "the suite stops you". If
+`docs/features/todo/2026-08-26-20-56-ambient-sound.md` ever ships, both entries land at once
+(194 characters) and the measurement is taken once.
+
+Two findings from that plan are **noted and not built**, each with its trigger written down in
+`docs/features/done/2026-08-26-20-56-session-stats-panel.md`: R10, a sessionized "time active"
+-- gaps longer than N seconds split the work into sessions and active time is their sum, where
+N is a constant with nothing behind it, chosen by looking at a real event stream nobody has
+captured; trigger, the first time someone compares two agents' spans and draws a wrong
+conclusion. And R11, that the counters die with the daemon -- no persistence, no export, no
+comparison across sessions, and no way to click a row and see only that agent's work on the
+graph; each is a feature rather than a step, and the filtering one is a real prospect, since
+many agents at once is the whole point of the tool.
 
 Not yet built: per-repository grouping in the panel (R5 in
 `docs/features/done/2026-08-17-16-21-multi-repo-git-status.md` — the `repo` field exists on

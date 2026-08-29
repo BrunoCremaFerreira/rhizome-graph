@@ -505,3 +505,115 @@ def test_the_module_pulls_in_nothing_from_the_daemon_side() -> None:
     offences = sorted(imported & set(FORBIDDEN_IMPORTS))
 
     assert offences == [], f"rhizome_graph/cli.py must stay pure; it imports {offences}"
+
+
+# --- 10. the session-stats interval ----------------------------------------
+#
+# The counters are published by a poll of their own, so how often is a knob, and
+# a knob is a `Settings` field: `daemon/server.py` may not read the environment
+# outside `main()` (`tests/test_daemon_environment_boundary.py` pins that with no
+# exemptions, and its definition of "reads the environment" is wide enough to
+# catch a value passed as an argument), so the only place this can be read is
+# here, in the pure `argv + environ + cwd -> Settings`.
+#
+# Modelled on `status_interval` in every respect but one, and the exception is
+# deliberate: the status interval is an environment variable with no flag, while
+# this one has both. An installed `rhi` is a command somebody types, and a
+# summary's refresh rate is exactly the kind of thing typed once to try it out;
+# there is no reason to make a person export a variable to slow down a panel.
+# Precedence is the module's own -- flag, then environment, then default -- so a
+# wrapper script exporting the variable is still overridden by a person who
+# typed the flag.
+#
+# Zero and negative mean "off" and are carried through rather than clamped, the
+# way the status interval's are, because `run()` reads a non-positive interval as
+# "create no task at all" (`tests/test_run_settings.py`).
+
+#: The variable the flag falls back to. Spelled as a literal on purpose: an
+#: environment is a plain mapping of strings, and a test that built its key from
+#: the constant it is checking would pass whatever the constant said.
+STATS_INTERVAL_VARIABLE = "RHIZOME_STATS_INTERVAL"
+
+
+def test_the_default_stats_interval_is_the_daemons_own() -> None:
+    """Two spellings of one default drift, and then one of them is wrong."""
+    assert (
+        settings_from(_args(), {}, CWD).stats_interval
+        == server.STATS_POLL_INTERVAL_SECONDS
+    )
+
+
+def test_the_stats_are_summarised_less_often_than_the_working_tree_is_read() -> None:
+    """A summary tolerates staleness that a list of clickable rows does not.
+
+    The relation, not the values: retuning either number stays free, and what
+    must not silently invert is which of the two panels is the eager one.
+    """
+    settings = settings_from(_args(), {}, CWD)
+
+    assert settings.stats_interval > settings.status_interval
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("12.5", 12.5),
+        (" 5 ", 5.0),
+        ("0", 0.0),
+        ("-1", -1.0),
+    ],
+)
+def test_a_usable_stats_interval_is_taken_from_the_environment(
+    raw: str, expected: float
+) -> None:
+    """Zero and negative mean "off", and are carried through, not clamped."""
+    settings = settings_from(_args(), {STATS_INTERVAL_VARIABLE: raw}, CWD)
+
+    assert settings.stats_interval == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "5 seconds", "NaN-ish"])
+def test_an_unusable_stats_interval_falls_back_to_the_default(raw: str) -> None:
+    """The daemon boots once; a typo in an optional knob must not cost it."""
+    settings = settings_from(_args(), {STATS_INTERVAL_VARIABLE: raw}, CWD)
+
+    assert settings.stats_interval == server.STATS_POLL_INTERVAL_SECONDS
+
+
+def test_the_stats_interval_may_be_given_on_the_command_line() -> None:
+    settings = settings_from(_args("--stats-interval", "20"), {}, CWD)
+
+    assert settings.stats_interval == 20.0
+
+
+def test_the_stats_interval_flag_beats_the_variable() -> None:
+    """Flag > environment > default, this module's rule, applied once more."""
+    settings = settings_from(
+        _args("--stats-interval", "20"), {STATS_INTERVAL_VARIABLE: "3"}, CWD
+    )
+
+    assert settings.stats_interval == 20.0
+
+
+def test_a_stats_interval_of_zero_on_the_command_line_means_off() -> None:
+    """Not falsy-therefore-unset: `--stats-interval 0` is somebody asking for no
+    poll at all, and reading it as "nothing was given" would silently restore
+    the default they were switching off."""
+    settings = settings_from(_args("--stats-interval", "0"), {}, CWD)
+
+    assert settings.stats_interval == 0.0
+
+
+def test_a_hostile_stats_interval_still_yields_a_settings() -> None:
+    """Total, like every other field: an unusable value was not chosen, and the
+    next source down answers instead. No exit from inside a pure call."""
+    settings = settings_from(_args(), {STATS_INTERVAL_VARIABLE: "soon"}, CWD)
+
+    assert isinstance(settings, Settings)
+
+
+def test_settings_names_the_stats_interval() -> None:
+    """`run()` may ask this value for anything it used to sniff."""
+    fields = {field.name for field in dataclasses.fields(Settings)}
+
+    assert "stats_interval" in fields

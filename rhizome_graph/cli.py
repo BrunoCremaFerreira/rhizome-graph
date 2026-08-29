@@ -72,6 +72,13 @@ DEFAULT_HTTP_PORT = 8080
 #: means the poll is not started at all.
 DEFAULT_STATUS_INTERVAL_SECONDS = 3.0
 
+#: How often the per-agent counters are summarised for the stats panel. Zero or
+#: negative means the poll is not started at all. Slower than the status poll on
+#: purpose: this is a summary of what has already happened and nothing in it is
+#: clickable, so a few seconds of staleness costs nothing, while a list of rows a
+#: click opens must not go on offering a file that is no longer there.
+DEFAULT_STATS_INTERVAL_SECONDS = 5.0
+
 #: What an installed command binds when nobody says otherwise. Loopback, because
 #: a command started casually should not open a perimeter nobody asked for; SSH
 #: and VS Code forwarding both arrive here and are unaffected.
@@ -229,6 +236,7 @@ PORT_ENV = "RHIZOME_HTTP_PORT"
 SOCKET_ENV = "RHIZOME_SOCKET"
 LOG_LEVEL_ENV = "RHIZOME_LOG_LEVEL"
 STATUS_INTERVAL_ENV = "RHIZOME_STATUS_INTERVAL"
+STATS_INTERVAL_ENV = "RHIZOME_STATS_INTERVAL"
 ALLOW_REMOTE_CONTROL_ENV = "RHIZOME_ALLOW_REMOTE_CONTROL"
 WEB_DIST_ENV = "RHIZOME_WEB_DIST"
 ATTENTION_ENV = "RHIZOME_ATTENTION"
@@ -271,6 +279,7 @@ class Settings:
     socket_path: str
     token: str
     status_interval: float
+    stats_interval: float
     log_level: str
     allow_remote_control: bool
     web_dist: str
@@ -319,6 +328,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "file of path patterns to be told about "
             f"(default: {DEFAULT_RULE_FILE} under the observed project)"
+        ),
+    )
+    parser.add_argument(
+        "--stats-interval",
+        type=float,
+        metavar="SECONDS",
+        default=None,
+        help=(
+            "how often to summarise what each agent did (default: "
+            f"{DEFAULT_STATS_INTERVAL_SECONDS}; 0 starts no poll at all)"
         ),
     )
     parser.add_argument(
@@ -398,6 +417,7 @@ def settings_from(
         ),
         token=token_from_env(environ),
         status_interval=_status_interval(environ),
+        stats_interval=_stats_interval(_flag(args, "stats_interval"), environ),
         log_level=_text(
             _flag(args, "log_level"), environ.get(LOG_LEVEL_ENV), DEFAULT_LOG_LEVEL
         ),
@@ -486,6 +506,37 @@ def _status_interval(environ: Mapping[str, str]) -> float:
         return float(raw)
     except ValueError:
         return DEFAULT_STATUS_INTERVAL_SECONDS
+
+
+def _stats_interval(flag: object, environ: Mapping[str, str]) -> float:
+    """How often the session-stats panel is summarised.
+
+    Modelled on :func:`_status_interval` in every respect but one: this value
+    has a flag as well as a variable. An installed `rhi` is a command somebody
+    types, and a summary's refresh rate is exactly the kind of thing tried out
+    once from the command line; there is no reason to make a person export a
+    variable to slow down a panel. Precedence is this module's own -- flag, then
+    environment, then default -- so a wrapper script exporting the variable is
+    still overridden by the person who typed the flag.
+
+    Zero and negative mean off and are carried through rather than clamped
+    (`run()` reads a non-positive interval as "create no task at all"), which is
+    why the flag is tested for its type and never for its truth:
+    ``--stats-interval 0`` is somebody switching the poll off, and reading it as
+    "nothing was given" would silently restore the default they were switching
+    off. Garbage falls back to the default: the daemon boots once, and a typo in
+    an optional knob must not cost it that boot.
+    """
+    if isinstance(flag, (int, float)) and not isinstance(flag, bool):
+        return float(flag)
+    raw = environ.get(STATS_INTERVAL_ENV, "")
+    raw = raw.strip() if isinstance(raw, str) else ""
+    if not raw:
+        return DEFAULT_STATS_INTERVAL_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_STATS_INTERVAL_SECONDS
 
 
 def _allow_remote_control(environ: Mapping[str, str]) -> bool:

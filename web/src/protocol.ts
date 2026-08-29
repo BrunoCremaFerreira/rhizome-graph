@@ -808,3 +808,112 @@ export function parseAttentionRules(raw: unknown): AttentionRulesFrame | null {
     truncated: raw.truncated === true,
   };
 }
+
+/**
+ * One agent's line of the session-stats table, as the daemon spells it.
+ *
+ * The browser cannot compute any of this. A client that reconnects is handed
+ * `reset`, `meta`, `status`, the seed and the last 200 events, and nothing in
+ * that replay says how many were lost — so a browser-side counter is not
+ * approximate, it is SILENTLY approximate, and two tabs opened five minutes
+ * apart disagree about the same session with no way for either to know. Hence
+ * the daemon counts and this is the row it sends.
+ *
+ * `agent` is identity and `label` is only text, exactly as on {@link AgentEvent}:
+ * two subagents of one type are two rows with two swatches.
+ */
+export interface AgentStatsEntry {
+  /** The actor key. `""` is the unattributed row — real work, by nobody on camera. */
+  agent: string;
+  /** The readable agent type, or `""`. Display text only. */
+  label: string;
+  /** Writes (`A`, `M` and `D` alike) and reads, counted APART and never summed. */
+  writes: number;
+  reads: number;
+  /** Distinct paths touched, and distinct directories worked in. */
+  files: number;
+  dirs: number;
+  /** The path it returned to most, and how often; `""` / `0` when nothing twice. */
+  topPath: string;
+  topCount: number;
+  /** When this agent was first and last seen, in the wire's own float seconds. */
+  firstTs: number;
+  lastTs: number;
+  /** Whether this agent hit the daemon's per-agent path cap, making its counts floors. */
+  truncated: boolean;
+}
+
+/**
+ * The whole per-agent table, pushed in a replaceable slot the way `status` is.
+ *
+ * Ordered by writes descending, ties by agent ascending. The parser preserves
+ * that order and judges none of it — `statsPanel.ts` sorts again, and puts the
+ * unattributed row last whatever its counts.
+ */
+export interface SessionStatsFrame {
+  /** One row per agent; `[]` is how the daemon says "nobody has done anything". */
+  agents: AgentStatsEntry[];
+}
+
+/** Whether `value` is a timestamp: any finite number, fraction included. */
+function isTimestamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * Validate and parse a raw WebSocket message into a {@link SessionStatsFrame}.
+ *
+ * Contract (see tests/statsProtocol.test.ts):
+ *   - `kind` must be exactly `"stats"`, load-bearing in both directions like
+ *     {@link parseStatus}'s: an answer routed as activity would grow a node
+ *     called "stats" in the graph and the poll would keep putting it back, and
+ *     an activity event mistaken for an answer would replace the whole table
+ *     with one row of nonsense.
+ *   - `agents` is the one field whose absence costs the frame, the way `query`
+ *     costs {@link parseSearchResult} its frame. `{"kind":"stats","agents":[]}`
+ *     is how the daemon says "nobody has done anything", so degrading a
+ *     mistyped `agents` to `[]` would report an empty session over a frame the
+ *     daemon never sent — the one lie this panel must not tell.
+ *   - A junk row is dropped ONE AT A TIME: one bad row must not cost the other
+ *     thirty-one, because a summary that vanishes because an agent id arrived
+ *     as a number is worse than a summary missing one line. A row needs a
+ *     string `agent` and nothing else — that is the identity the row is about
+ *     and the seed of its swatch, and degrading it to `""` would merge it into
+ *     the unattributed row, inventing work for nobody out of work by somebody.
+ *   - Every other field DEGRADES. The counts are non-negative integers or `0`:
+ *     they reach a corner of the page as text, and `NaN writes` or `-3 files`
+ *     are not numbers a reader can act on. The timestamps keep their fractions
+ *     — `ts` is a float on every frame this protocol carries, and rounding one
+ *     here would make the span wrong — and degrade to `0` only when they are
+ *     not finite numbers at all. `truncated` follows the `attention` rule: a
+ *     truthy non-boolean is `false`, because a panel that claimed its numbers
+ *     were floors over a daemon of another version would teach the reader to
+ *     ignore the caveat.
+ *   - NEVER throws: this comes off the network.
+ */
+export function parseStats(raw: unknown): SessionStatsFrame | null {
+  if (!isRecord(raw)) return null;
+  if (raw.kind !== "stats") return null;
+  if (!Array.isArray(raw.agents)) return null;
+
+  const agents: AgentStatsEntry[] = [];
+  for (const item of raw.agents) {
+    if (!isRecord(item)) continue;
+    if (typeof item.agent !== "string") continue;
+    agents.push({
+      agent: item.agent,
+      label: typeof item.label === "string" ? item.label : "",
+      writes: isCount(item.writes) ? item.writes : 0,
+      reads: isCount(item.reads) ? item.reads : 0,
+      files: isCount(item.files) ? item.files : 0,
+      dirs: isCount(item.dirs) ? item.dirs : 0,
+      topPath: typeof item.topPath === "string" ? item.topPath : "",
+      topCount: isCount(item.topCount) ? item.topCount : 0,
+      firstTs: isTimestamp(item.firstTs) ? item.firstTs : 0,
+      lastTs: isTimestamp(item.lastTs) ? item.lastTs : 0,
+      truncated: item.truncated === true,
+    });
+  }
+
+  return { agents };
+}

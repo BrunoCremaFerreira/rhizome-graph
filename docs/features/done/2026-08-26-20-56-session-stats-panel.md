@@ -1,9 +1,9 @@
 # Plan: Session statistics panel -- what did this session actually do?
 
-- **Status:** todo
+- **Status:** done
 - **Created:** 2026-08-26 20:56
-- **Implemented:** -- (date, and the branch it landed on)
-- **PR/commit:** --
+- **Implemented:** 2026-08-29, on `development`
+- **PR/commit:** -- (uncommitted; per rule 3 the tree is left for the user to decide)
 - **Consultations (mandatory):**
   - `software-architect` (2026-08-26) -- this document is its assessment and staged plan, and
     it names the owner of every RED/GREEN step below.
@@ -17,6 +17,13 @@
     SPECIFIED`, appended at the end of this document. The full review is
     `docs/features/2026-08-26-tester-review-five-plans.md`. No implementation step here may
     start before the RED test it names exists.
+  - `software-architect` (2026-08-29) -- consulted a second time, during implementation, on the
+    one decision this plan had got wrong: R7's placement, whose premise ("top-left is the only
+    free corner") expired when the attention panel shipped there. Its answer is in
+    "Implementation record" at the end.
+  - `developer-tester` -> `developer-backend` / `developer-frontend` (2026-08-29) -- the
+    RED/GREEN loop itself. Every test in this feature was written before the implementation
+    agent that took it green was asked for a line of code.
 
 Written 2026-08-26 against `fd0f34e`, with the frontend suite green at the numbers in section 0
 and the backend suite **unrunnable on this host** (see section 0). Every line number below is
@@ -592,6 +599,14 @@ the whole risk, and 6.1 passing without 6.4 is a binding that can silently outra
 
 ### R7 -- There is nowhere to draw it. **Rank: now, and it is the step with the least testable content**
 
+> **SUPERSEDED before implementation, and the section below is kept as written.**
+> Its premise -- "top-left is the only free corner" -- was true when this was
+> written and false by the time it was built: `#attention` has occupied
+> `top:14px; left:14px` since `2026-08-26-20-56-attention-rules.md` shipped.
+> `software-architect` re-decided the placement on 2026-08-29 and the step table
+> 7.1-7.7 that was actually built is in "Implementation record" at the end of
+> this document. Read that table, not the one below.
+
 **What is missing.** No element, no painter, no CSS.
 
 **Where.** `web/index.html`: a new `#session-stats` element, **top-left**. `web/src/statsHud.ts`: a
@@ -926,3 +941,212 @@ plan is honest about it; I am recording the verdict rather than criticising the 
 
 ---
 
+
+---
+
+## Implementation record (2026-08-29, branch `development`)
+
+Built by the specialists in the loop `CLAUDE.md` rule 2 requires: `developer-tester`
+wrote every RED test before any implementation agent saw the step,
+`developer-backend` took R1-R3 green, `developer-frontend` took R4-R7 green, and
+`software-architect` was consulted once more, on the one decision this plan had got
+wrong (R7's placement).
+
+**Suites.** Backend 1641 -> **1745 passed, 20 skipped**. Frontend 1649 -> **1768
+passed, 64 files**. `tsc --noEmit` clean, `vite build` clean. Both baselines were
+measured before the first test was written and neither lost a passing test.
+
+Note the plan's section 0 is wrong about this host in one respect that mattered:
+it records the backend suite as "unrunnable, pytest is installed nowhere". It is
+runnable -- `.venv/bin/pytest` exists and works -- so every "both suites green
+between any two steps" in this document was an observation after all, not merely a
+requirement. Its frontend count (1403) was also already stale by the time the work
+started; the tree said 1649.
+
+### What was already done when the work started
+
+- **R8 was closed** by the attention-rules feature: `actorColor` is in `colors.ts`
+  and `renderer.ts` already calls it. Step 8.1 was pinned in `web/tests/colors.test.ts`
+  as well. Only step 8.2 was genuinely missing -- the *behaviour* was right (no
+  `"actor:"` literal survives in `renderer.ts`) with nothing pinning it -- so it was
+  added as `tests/test_actor_colour_single_spelling.py`, a jaw that passes.
+- **R2's seam was closed** by the same feature: `EventHub._observe` already existed,
+  already the single call site both `_publish` and `_broadcast_transient` come
+  through, with `seed_paths` structurally outside it. Decision 6 was therefore paid
+  for in advance, and R2 became "hang the counters off it" -- one line.
+- **The `main.ts` source harness exists.** The tester consultation's finding 2.1
+  ("rows 6.5, 7.3 and 8.2 assume a TypeScript source-level test harness that does not
+  exist in this repository") was out of date: `tests/frontend_source.py` was created
+  by the attention-rules feature. Rows 6.5 and 7.7 were therefore both written, in
+  `tests/test_stats_panel_wiring.py`, reusing that reader.
+
+### R7, as actually decided and built
+
+**`#session-stats` sits top-RIGHT, as the second child of a new fixed column
+(`#top-right-column`) that also holds `#size-legend`. `#attention` changes in no way.**
+
+The argument is geometric and needed no browser, which is what made it decidable on
+a tty. `#attention` is `left:14px; max-width:32vw`, so its right edge is at most
+`14px + 32vw`; a right-anchored `max-width:32vw` box's left edge is at least
+`68vw - 14px`. They can meet only below a **78 px viewport**. So "a summary the user
+opened must never cover an alarm the user did not ask for" is settled by the
+stylesheet rather than by a rule someone has to remember -- and that asymmetry is
+the real content of the decision: `#attention` is a passive alarm that exists to be
+seen unasked, this panel is a summary that is closed by default and read at the end
+of a task (decision 1).
+
+A second box merely *pinned* near the legend was rejected: `#size-legend` has **no
+`max-height`** and its `.error` row is a daemon-supplied string, so any `top:` offset
+below it is a guess about a height nothing bounds, and sharing `top:14px; right:14px`
+is a deterministic total overlap for as long as F7 is armed -- the precise defect
+`tests/test_bottom_row_containment.py` was written about. The flex column makes that
+overlap unrepresentable rather than merely absent today.
+
+The legend is **first** in the column: the box that has always owned the corner does
+not move, and the newcomer absorbs the variability. `#size-legend` lost exactly three
+declarations (`position`, `top`, `right`) to the wrapper and kept everything else,
+including `[hidden] { display: none }`, which collapses the flex child *and* its gap.
+The wrapper carries no padding, border, margin or background, so the legend renders
+as it did -- **and no test can check that**; it is the one thing here a human at a
+browser still has to confirm.
+
+The step table built, replacing 7.1-7.3, is in `tests/test_top_right_column_containment.py`:
+
+| # | Property pinned |
+|---|---|
+| 7.1 | `#session-stats` exists and its parent chain contains none of `#hud`, `#context`, `#status`, nor their shared parent |
+| 7.2 | `#session-stats` and `#size-legend` share one parent, and it is not `<body>` |
+| 7.3 | `#size-legend`'s own rule declares no `position`/`top`/`right`, and the wrapper's declares `position: fixed` -- wrapping without un-pinning is the easy half-fix and leaves the overlap where it was |
+| 7.4 | `#session-stats` bounds itself in `vh` and `vw`; values deliberately not pinned |
+| 7.5 | `pointer-events: none` on the box, `auto` on the list -- both in one test, because `none` on both makes 45vh of rows unscrollable and `auto` on the box eats every drag across 32vw x 45vh |
+| 7.6 | The wrapper precedes `#file-view` in document order, **and** the stylesheet declares no `z-index` anywhere -- the premise being that paint order here IS source order |
+| 7.7 | `main.ts`'s `onReset` clears the panel |
+
+Every assertion is over containment and properties, never over the wrapper's id or
+over a value, so the implementation could name and tune freely. The readers are the
+existing ones -- `_ParentIndex` from `test_bottom_row_containment.py`,
+`_declaration_blocks` / `_is_subject` from `test_bottom_row_width_bounds.py` -- imported
+rather than rewritten, so the nesting is read by exactly the code the bottom-row
+policy reads it with.
+
+Four further corrections to R7's prose, recorded rather than silently fixed:
+
+- Its four-corner survey omits `#attention`, `#status` (bottom-right, `max-height:40vh`)
+  and both `#file-view` modes.
+- "The docked file view is 40vw on the right and **cannot reach it**" is reversed by
+  the new placement: the docked panel covers `#session-stats` completely. A stated
+  bargain, undone by closing the panel.
+- The `#hud`/`#log` arithmetic ("45 + 30 leaves 25vh") is no longer the binding
+  constraint; the right-column arithmetic against `#status` is (`45vh + 24px < 60vh`,
+  clear above ~440 px of viewport height).
+- Surfaced, not created, and not this feature's to fix: `#size-legend` collides with
+  `#root-bar` below ~2078 px of width, while its comment claims only the search bars.
+
+### The wire frame, as pinned
+
+```json
+{"kind":"stats","agents":[{"agent":"a1","label":"developer-backend","writes":2,"reads":0,
+  "files":1,"dirs":1,"topPath":"src/x.py","topCount":2,
+  "firstTs":1.0,"lastTs":9.0,"truncated":false}]}
+```
+
+Five properties the plan did not settle and the tests now do:
+
+1. `topPath` is `""` and `topCount` is `0` when nothing was visited twice; a tie is
+   broken by the smallest path, so the dedupe on the encoded string actually fires.
+2. **The frame's order is not the panel's.** The daemon sorts by writes descending,
+   ties by agent; decision 8's "unattributed last regardless of its counts" is the
+   *panel's* sort alone. Stated in both test headers so the two do not read as a
+   contradiction.
+3. `dirs` counts distinct *parent* directories with the root counted as one --
+   reporting `0` for an agent that only edited root files would read as "worked
+   nowhere".
+4. `firstTs`/`lastTs` are min/max, never first-arrived/last-arrived: hook and watcher
+   stamps come from different clocks in different processes, so arrival order can
+   otherwise put the end before the beginning.
+5. `truncated` is per row; one agent hitting the cap does not mark another.
+
+### Deviations from the plan's own step tables
+
+- **`--stats-interval` exists as a CLI flag.** `status_interval`, the precedent
+  R3.6 names, is environment-only (`RHIZOME_STATUS_INTERVAL`). The plan asked for
+  "a flag, an environment override and a default", so the flag was built and the
+  divergence from the precedent written into the test section's header rather than
+  left to be discovered.
+- **`publish_stats` is synchronous.** `publish_status` is a coroutine because it
+  forks `git`; this forks nothing. `_stats_busy` is still set and cleared around it,
+  so the day the publisher grows an await, `poll_stats`'s guard already covers it.
+- **`publish_stats` needs no root check**, which is the one place decision 7 is
+  visible in the code: `publish_status` needs one because its fork outlives its read
+  of `self.root`, and nothing here can be overtaken by a `ctrl+L`. What answers the
+  switch is `EventHub.reset` emptying the counters synchronously.
+- **`truncated` on the panel is computed over the rows on screen**, not over the
+  whole frame: the header caveat is about numbers a reader can see, and what the cap
+  left out is already reported separately.
+- **`statsPanel.DEFAULT_MAX_ROWS` is 20, deliberately not 32.** 32 is the daemon's
+  `MAX_AGENTS`, and two constants that merely happen to be equal is the failure this
+  repository names elsewhere. 20 rows against `max-height: 45vh` is a guess nobody
+  has seen.
+- **A root switch drops the numbers and keeps the toggle** (`showStats(null, statsOpen)`):
+  the table described a project the user has left, but F8's state is the reader's.
+- **The label is only overwritten when the event carried one**, so a later
+  unattributed-name event cannot blank a name an earlier one supplied.
+
+### What was NOT built, and why
+
+- **R9 -- the legend entry. F8 therefore ships UNDISCOVERABLE, and that is the single
+  largest known cost of this feature.** The plan ranked it `next` and declared it
+  unclosable here, and that is still true: adding `" - F8: session stats"` grows the
+  legend from 162 to 182 characters, a 12% growth in the widest thing in
+  `#bottom-bar`, and `CONTEXT_WIDTH_FRACTION = 0.34` is a *browser measurement*
+  against exactly the 162-character string at 1280 and 1600. This host is a tty.
+  What was built instead is the tester's corrected specification -- a jaw in
+  `tests/test_bottom_row_width_bounds.py` pinning the legend at exactly 162
+  characters, passing today on purpose, whose docstring says the number may only be
+  changed by re-measuring in a browser and writing the new one down with the date.
+  It converts "somebody will remember to re-measure" into "the suite stops you".
+- **R10 (sessionized "time active")** and **R11 (persistence, per-agent graph
+  filtering)** -- noted with their triggers in the sections above, unchanged.
+
+### Verified against a live daemon (2026-08-29)
+
+The daemon half was driven end to end, the way this repository verifies every feature's
+server side: real `run(settings, ready=...)`, real Unix ingest socket, real WebSocket
+clients, real hook payloads. All ten questions asked were confirmed -- the replay position
+by index (`meta, status, agentState, attention, stats`, then the tree), the seed counting
+as nothing over a 41-file root, attribution keyed on `agent_id` and labelled with
+`agent_type`, reads counted apart with the `A`-after-`R` and no-`R`-in-replay doctrine
+undisturbed, two subagents of one type staying two rows, the unattributed row, the poll
+publishing only on change, the root switch emptying the table for present and future
+clients alike, `--stats-interval 0` creating no poll, and every frame checking
+field-for-field against `parseStats`. The summary is in `CLAUDE.md`'s Integration bullet.
+
+**What it surfaced is older than this feature: one edit produces two events.** The
+hook/watcher dedupe is one-directional -- `ingest_fs_change` skips what `_recently_hooked`
+reports, but `ingest_line` never consults `_fs_paths` -- so it only works when the hook wins
+the race, and a ~40-56 ms hook process against a file already on disk usually loses. Three
+edits by one agent measured `writes: 5` plus a phantom `agent: ""` row. An archive of `HEAD`
+reproduces the double event with none of this code, so the counters are faithful and the
+defect is not a regression; what this feature changes is that an uncountable double flash
+becomes a quantified number on screen. **The panel's `writes` counts events, not edits.**
+The fix belongs upstream in `ingest_fs_change` with its own RED test, not in the counters,
+and it is recorded rather than taken here because it is wider than this plan.
+
+### Not verified, and this host cannot verify it
+
+Nothing in this feature has been on a screen; the usual gap, and the usual reasons.
+Whether the top-right column reads as one corner or as two boxes stacked. Whether
+20 agent rows in a 45vh box is a panel or a wall. Whether a row's three lines survive
+`max-width: 32vw` with a long agent id and a long path. Whether the `truncated`
+caveat reads as informative or as clutter -- the judgement section 4 already says
+nobody here can make. Whether the summary and `#log` meet at a short viewport, and
+whether the column meets the centred search bars at a narrow one. And, sharpest
+because no test can reach it at all: **whether `#size-legend` renders pixel-for-pixel
+as it did before it was wrapped.**
+
+Nor is any of it measured against a real session. The daemon-side per-event cost
+remains the plan's estimate rather than a measurement -- 2.17 us is the *browser's*
+accumulator in Node 18, and the Python equivalent was asserted to be of the same
+order, not shown. `MAX_TRACKED_PATHS` (2 000), `MAX_AGENTS` (32), `DEFAULT_MAX_ROWS`
+(20) and the 5 s poll interval are all pinned guesses; no session here has been long
+enough to reach any of them.

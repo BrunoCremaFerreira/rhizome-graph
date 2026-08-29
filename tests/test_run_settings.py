@@ -350,3 +350,74 @@ def test_the_status_poll_runs_at_the_interval_the_settings_carried(
             await _shutdown(task)
 
     _run(scenario())
+
+
+# --- 4. the session-stats poll, on the same terms ---------------------------
+#
+# Restated here rather than in `tests/test_hub_stats.py` for the reason section 3
+# gives: whether a poll is created at all is a property of `run()`, not of the
+# `Session` method it would have created a task for, and the guard that reads
+# "no task, not a loop that wakes up and skips" lives in exactly one place. The
+# two tests below are section 3's, with one field changed, so the stats poll
+# inherits the rule instead of growing a second version of it.
+
+
+def _recording_poll_stats(calls: list[float]):
+    async def fake(self, interval: float = 5.0):
+        calls.append(interval)
+        await asyncio.sleep(3600)
+
+    return fake
+
+
+def test_a_stats_interval_of_zero_starts_no_poll_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`poll_status`'s own rule: `0` creates no task, rather than a task that
+    wakes up five times a minute to decide against publishing."""
+    _scrub(monkeypatch)
+    calls: list[float] = []
+    monkeypatch.setattr(server.Session, "poll_stats", _recording_poll_stats(calls))
+    settings = dataclasses.replace(
+        _base_settings(tmp_path),
+        host="127.0.0.1",
+        port=_free_port(),
+        socket_path=str(tmp_path / "ingest.sock"),
+        web_dist=str(_site(tmp_path)),
+        stats_interval=0.0,
+    )
+
+    async def scenario():
+        task = await _serve(settings)
+        try:
+            assert calls == []
+        finally:
+            await _shutdown(task)
+
+    _run(scenario())
+
+
+def test_the_stats_poll_runs_at_the_interval_the_settings_carried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The knob has to reach the loop, not merely be parsed correctly."""
+    _scrub(monkeypatch)
+    calls: list[float] = []
+    monkeypatch.setattr(server.Session, "poll_stats", _recording_poll_stats(calls))
+    settings = dataclasses.replace(
+        _base_settings(tmp_path),
+        host="127.0.0.1",
+        port=_free_port(),
+        socket_path=str(tmp_path / "ingest.sock"),
+        web_dist=str(_site(tmp_path)),
+        stats_interval=11.5,
+    )
+
+    async def scenario():
+        task = await _serve(settings)
+        try:
+            assert calls == [11.5]
+        finally:
+            await _shutdown(task)
+
+    _run(scenario())

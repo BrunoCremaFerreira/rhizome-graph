@@ -79,6 +79,7 @@ from rhizome_graph.assets import WEB_DIST_ENV, default_web_dist
 from rhizome_graph.cli import (
     DEFAULT_HTTP_PORT,
     DEFAULT_SOCKET_PATH,
+    DEFAULT_STATS_INTERVAL_SECONDS,
     DEFAULT_STATUS_INTERVAL_SECONDS,
     Settings,
     build_parser,
@@ -98,6 +99,7 @@ from rhizome_graph.normalize import (
 )
 from rhizome_graph.paths import complete_dir, resolve_root
 from rhizome_graph.repo import display_root, read_branch
+from rhizome_graph.session_stats import SessionStats
 from rhizome_graph.sizes import measure_sizes, sizes_frame
 from rhizome_graph.status import git_status, status_frame
 from rhizome_graph.token import inject_token, mint_token, token_matches
@@ -144,6 +146,15 @@ REPO_POLL_INTERVAL_SECONDS = 2.0
 #: caption down to the slowest of the two.
 STATUS_POLL_INTERVAL_SECONDS = DEFAULT_STATUS_INTERVAL_SECONDS
 
+#: How often the per-agent counters are summarised for the stats panel. Slower
+#: than the status poll, and for the opposite reason to the branch poll's speed:
+#: this is a summary of what has already happened (`CLAUDE.md`'s "interesting at
+#: the end of a task and boring in the middle"), it forks nothing, and nothing in
+#: it is clickable, so a few seconds of staleness costs the reader nothing. In a
+#: task of its own rather than per event: the counters move on every event, the
+#: frame does not have to.
+STATS_POLL_INTERVAL_SECONDS = DEFAULT_STATS_INTERVAL_SECONDS
+
 
 class IngestSocketInUseError(RuntimeError):
     """Another daemon is already listening on the ingest socket.
@@ -188,6 +199,13 @@ class EventHub:
         every root switch, and "no rule file was found" is a fact a client
         connecting at any moment has to be told, because an alarm panel that
         never alarms is what a healthy session looks like too.
+      * ``stats`` / ``_stats`` -- what each agent has done to this project so
+        far, and the last table published from it. The counters are public
+        because the session publishes them and nothing else reads them; the
+        table is a slot of the same kind as ``_status``, for the sharpest
+        version of the same reason -- it is re-published every few seconds for
+        the life of the session, and appended it would push the project's own
+        tree out of the replay.
       * ``_reset`` -- the last "the observed project changed, clear everything"
         frame, in a replaceable slot like ``_meta`` (see :meth:`reset`).
       * ``_last_hook`` -- the actor that acted most recently, as
@@ -213,6 +231,8 @@ class EventHub:
         self._recent: deque[str] = deque(maxlen=buffer_size)
         self._meta: str | None = None
         self._status: str | None = None
+        self.stats = SessionStats()
+        self._stats: str | None = None
         self._agent_states: dict[str, AgentState] = {}
         self._agent_state: str | None = None
         self._attention = attention.EMPTY
@@ -249,13 +269,23 @@ class EventHub:
         that rule: a header behind twenty thousand seed events is a header
         nobody sees, and this one is what tells the reader whether any rule is
         in force at all.
+
+        The per-agent table closes that group, after the caption and before the
+        tree, for the same sentence read one step further: a summary painted
+        ahead of the caption describes a project the reader has not been told
+        the name of, and one painted behind the seed arrives seconds late on a
+        graph that has already settled.
         """
         reset = [self._reset] if self._reset is not None else []
         meta = [self._meta] if self._meta is not None else []
         status = [self._status] if self._status is not None else []
         agents = [self._agent_state] if self._agent_state is not None else []
         rules = [self._attention_frame] if self._attention_frame is not None else []
-        return [*reset, *meta, *status, *agents, *rules, *self._seed, *self._recent]
+        stats = [self._stats] if self._stats is not None else []
+        return [
+            *reset, *meta, *status, *agents, *rules, *stats,
+            *self._seed, *self._recent,
+        ]
 
     async def register(self, websocket: ServerConnection) -> None:
         """Add a client and replay the tree plus recent activity."""
@@ -303,6 +333,27 @@ class EventHub:
         if message == self._status:
             return
         self._status = message
+        broadcast(self._clients, message)
+
+    def set_stats(self, frame: dict) -> None:
+        """Publish what each agent has done, but only when it actually changed.
+
+        :meth:`set_status`'s mechanism exactly, and here the dedupe is what makes
+        the poll affordable: an idle session republishes a byte-identical table
+        every few seconds for hours, and every one of those would otherwise cost
+        a broadcast to every connected browser. The comparison is on the encoded
+        message, not the dict, because that is exactly what a client would
+        receive.
+
+        A slot rather than a ring, for the same reason ``_status`` is one:
+        appended, a table republished for the life of the session would grow the
+        replay without bound and eventually push the project's own tree out of
+        it.
+        """
+        message = json.dumps(frame, separators=(",", ":"))
+        if message == self._stats:
+            return
+        self._stats = message
         broadcast(self._clients, message)
 
     def set_agent_state(self, state: AgentState) -> None:
@@ -400,6 +451,15 @@ class EventHub:
         clears the dedupe, which matters -- two projects can be dirty in exactly
         the same way, and the second one would otherwise never be announced.
 
+        The counters go with it, and so does the table published from them: the
+        work they recorded was done in a project nobody is watching any more, so
+        a surviving table would report another project's numbers under this
+        project's name, and the slot has to go with the counters or the next
+        client to connect is replayed exactly that. Dropping the slot drops the
+        dedupe too, which matters here as it does for ``_status`` -- two projects
+        can produce an identical table, and the second one would otherwise never
+        be announced at all.
+
         ``_agent_states`` goes for the clearest version of the reason of all:
         an actor is a figure standing in a *project*, so a waiting ring left
         over from the root just abandoned reports somebody blocked on work that
@@ -422,6 +482,8 @@ class EventHub:
         self._seed.clear()
         self._recent.clear()
         self._status = None
+        self.stats.reset()
+        self._stats = None
         self._agent_states.clear()
         self._agent_state = None
         self._attention = attention.EMPTY
@@ -591,12 +653,22 @@ class EventHub:
         snapshot in which nobody did anything -- and it is never paid. Routing
         the seed through here for consistency would also alarm 12 524 times.
 
+        The counters are offered the event here for that same reason and not
+        merely for convenience: a second hook point for one "here is an event"
+        moment is how a later change -- "reads should not count", "deletions
+        count double" -- lands in one of them and not the other, and the symptom
+        is a total that is right for hook events and wrong for watcher events. A
+        read is counted and kept apart from the writes (see
+        :mod:`rhizome_graph.session_stats`); the seed is exempt structurally,
+        exactly as it is exempt from the rules above.
+
         The key is written only when the answer is true, which is
         ``parse_command``'s "a key appears only when the frame carried it in a
         form this daemon understands" read from the other direction: it keeps
         every existing pinned event-frame assertion byte-identical and makes the
         wire cost of this feature zero for the events that do not alarm.
         """
+        self.stats.observe(event)
         if not self._attention.rules:
             return _encode(event)
         return _encode(event, attention.matches(self._attention, event.path))
@@ -836,6 +908,7 @@ class Session:
         self.hub = EventHub(project_root=self.root)
         self._watcher = None
         self._status_busy = False
+        self._stats_busy = False
         self.load_attention()
 
     # -- lifecycle ---------------------------------------------------------
@@ -934,6 +1007,34 @@ class Session:
             return
         self.hub.set_status(status_frame(entries))
 
+    def publish_stats(self) -> None:
+        """Publish what the hub has counted so far, for whoever is watching.
+
+        The session publishes; it counts nothing itself. The counters live on
+        the hub because that is where every event already arrives, and the frame
+        is built here because that is where the rhythm is decided --
+        :meth:`poll_stats` calls this, and so may anything else that wants the
+        table brought up to date at a moment of its own.
+
+        Not `async`, and not a mistake: unlike :meth:`publish_status` there is
+        nothing to fork and nothing to wait for -- the table is a dict that is
+        already in memory. The in-flight flag is still set and cleared around the
+        call, so the day the publisher grows an await (a table built off the
+        loop, a figure that has to be measured) :meth:`poll_stats`'s guard is
+        already covering it rather than having to be remembered.
+
+        No root check either, for the reason :meth:`publish_status` needs one:
+        that method's fork outlives its read of ``self.root``, while nothing
+        here can be overtaken by a `ctrl+L`. What answers the switch is
+        ``EventHub.reset`` emptying the counters, synchronously, before the new
+        project's first event arrives.
+        """
+        self._stats_busy = True
+        try:
+            self.hub.set_stats(self.hub.stats.frame())
+        finally:
+            self._stats_busy = False
+
     # -- the switch --------------------------------------------------------
 
     async def switch_root(self, text: str) -> str | None:
@@ -1013,6 +1114,30 @@ class Session:
             if self._status_busy:
                 continue
             await self.publish_status()
+
+    async def poll_stats(self, interval: float = STATS_POLL_INTERVAL_SECONDS) -> None:
+        """Keep the session-stats panel current, in a task of its own.
+
+        A poll rather than a publish per event, and that is the whole reason the
+        panel is affordable: the counters move on every single event, so a
+        publish per event would be a fresh `json.dumps` and a broadcast to every
+        connected client for every keystroke of an agent's work. The frame does
+        not have to move at that rhythm -- it is a summary, and a few seconds
+        behind is what a summary may be.
+
+        A round is skipped while another is still in flight, which is
+        :meth:`poll_status`'s own rule kept rather than dropped: nothing this
+        publisher does today can outlast a tick, and the guard is what stops a
+        round per tick stacking up the first time it can.
+
+        `set_stats` filters out unchanged answers -- an idle session frames a
+        byte-identical table forever -- so the loop itself stays dumb.
+        """
+        while True:
+            await asyncio.sleep(interval)
+            if self._stats_busy:
+                continue
+            self.publish_stats()
 
     # -- inbound commands --------------------------------------------------
 
@@ -1437,6 +1562,15 @@ async def run(settings: Settings, ready: Callable[[Readiness], None] | None = No
         else None
     )
 
+    # Same shape and the same guard: a non-positive interval creates no task at
+    # all, rather than a loop that wakes up and decides against publishing.
+    stats_interval = settings.stats_interval
+    stats_poll = (
+        asyncio.create_task(session.poll_stats(stats_interval))
+        if stats_interval > 0
+        else None
+    )
+
     # The override travels as a field, so the search is run over the value this
     # daemon was configured with instead of over whatever the process was
     # started with. Empty means "look where you are installed", which is
@@ -1481,7 +1615,7 @@ async def run(settings: Settings, ready: Callable[[Readiness], None] | None = No
             with contextlib.suppress(asyncio.CancelledError):
                 await stop
     finally:
-        for task in (repo_poll, status_poll):
+        for task in (repo_poll, status_poll, stats_poll):
             if task is None:
                 continue
             task.cancel()

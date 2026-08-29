@@ -294,26 +294,56 @@ body {
 }
 
 /*
- * The size legend (F7), top right — the only thing that gives the size ramp a
- * meaning. The scale is root-relative and hinged at the median, so a bar with
- * no numbers under it says nothing: each row prints its p10, its median and its
- * p90, and there are two rows because files and directories are ranked on
- * separate distributions.
+ * The top-right column: the size legend (F7) above the session summary (F8).
+ *
+ * The column exists so the two boxes are laid out against EACH OTHER rather
+ * than each against the viewport. #size-legend has no max-height at all and its
+ * error row is a string the daemon supplies, so any `top:` offset chosen to sit
+ * below it is a guess about a height nothing bounds; sharing `top: 14px;
+ * right: 14px` outright is a deterministic, total overlap for as long as F7 is
+ * armed. A flex column makes that overlap unrepresentable instead of merely
+ * absent today.
+ *
+ * It carries NO padding, border, margin or background of its own: the legend
+ * has to render exactly as it did before it was wrapped. The pinning that used
+ * to be on the legend is here now, which is the whole point — a `position:
+ * fixed` child would ignore this container and land back where it started.
  *
  * Top right rather than in #bottom-bar, whose three-track grid reserves a
  * measured width on each side of the centred root caption; a fourth box there
- * would change that arithmetic silently. It overlaps the two search bars
- * (centred at the same top) only at very narrow widths, and the docked file
- * panel simply paints over it — the same bargain #status already accepts, since
- * closing the panel undoes it.
+ * would change that arithmetic silently. The column overlaps the two search
+ * bars (centred at the same top) only at very narrow widths, and the docked
+ * file panel simply paints over it — the same bargain #status already accepts,
+ * since closing the panel undoes it.
  *
- * `pointer-events: none` because nothing here is clicked: the legend must never
- * eat a drag or a click meant for the canvas underneath.
+ * `pointer-events: none` so the column never eats a drag or a click meant for
+ * the canvas underneath; the one part that takes hit-testing back is the
+ * summary's scrolling list.
  */
-#size-legend {
+#top-right-column {
   position: fixed;
   top: 14px;
   right: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+/*
+ * The size legend (F7) — the only thing that gives the size ramp a meaning. The
+ * scale is root-relative and hinged at the median, so a bar with no numbers
+ * under it says nothing: each row prints its p10, its median and its p90, and
+ * there are two rows because files and directories are ranked on separate
+ * distributions.
+ *
+ * It declares no position of its own: the column above owns the corner, and the
+ * legend is first in it because the box that has always been here does not
+ * move. `display: none` while hidden collapses the flex child AND its gap, so a
+ * closed legend leaves the summary exactly where it would sit alone.
+ */
+#size-legend {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -372,6 +402,172 @@ body {
 #size-legend .error {
   max-width: 190px;
   color: #ff8a7a;
+}
+
+/*
+ * The session summary (F8): one row per agent, saying what it did this session.
+ *
+ * Second in the top-right column, under the size legend. Bounded on BOTH axes
+ * against the viewport rather than against its content: 32 agents at row height
+ * is taller than any window, and an agent id is arbitrary text while a path is
+ * unbounded, so without the two bounds the panel would run off the bottom of
+ * the screen and grow left across the graph and over the centred search bar.
+ * `max-width: 32vw` is #attention's own bound, which is what makes the alarm
+ * panel and this one non-overlapping by construction: #attention's right edge
+ * is at most `14px + 32vw` and this box's left edge is at least `68vw - 14px`,
+ * and those meet only below a 78px viewport.
+ *
+ * `pointer-events: none` on the box with `auto` on the list is the load-bearing
+ * pair #attention and #bottom-bar both carry: `none` on both would make 45vh of
+ * rows unscrollable, and `auto` on the box would have it swallow every drag
+ * across 32vw x 45vh of canvas with nothing on screen explaining why the graph
+ * went dead.
+ */
+#session-stats {
+  display: flex;
+  flex-direction: column;
+  max-width: 32vw;
+  max-height: 45vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 10px;
+  border: 1px solid #2a2e34;
+  border-radius: 6px;
+  background: rgba(12, 13, 15, 0.82);
+  color: #8a8f98;
+  font: 12px/1.4 system-ui, sans-serif;
+  pointer-events: none;
+  user-select: none;
+  scrollbar-width: none;
+}
+
+/*
+ * The `display: flex` above would otherwise override the `hidden` attribute and
+ * leave the panel on screen once F8 closes it — the same trap as
+ * #context-branch, #search, #root-bar, #size-legend and #file-view.
+ */
+#session-stats[hidden] {
+  display: none;
+}
+
+#session-stats::-webkit-scrollbar {
+  display: none;
+}
+
+#session-stats .head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: #5c6067;
+  white-space: nowrap;
+}
+
+#session-stats .title {
+  color: #d5d9df;
+}
+
+/* The caveat that a count is a floor. Empty on an exact table, and then gone. */
+#session-stats #session-stats-note {
+  margin-bottom: 4px;
+  color: #5c6067;
+  overflow-wrap: anywhere;
+}
+
+#session-stats #session-stats-note:empty {
+  display: none;
+}
+
+#session-stats #session-stats-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  /* The rows are read and scrolled through, so this half takes hit-testing back
+   * from the container above. */
+  pointer-events: auto;
+}
+
+#session-stats li {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+#session-stats li:last-child {
+  margin-bottom: 0;
+}
+
+#session-stats .who {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The agent's own colour, so the row and the figure in the graph agree. */
+#session-stats .swatch {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+/* The agent's name is what gets clipped when it is long; the counts stay. */
+#session-stats .name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #d5d9df;
+}
+
+#session-stats .counts {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: #8a8f98;
+}
+
+/* The mark saying this row's numbers are floors rather than counts. */
+#session-stats .floor {
+  flex: 0 0 auto;
+  color: #ff8a7a;
+}
+
+#session-stats .meta {
+  display: flex;
+  gap: 8px;
+  color: #5c6067;
+}
+
+#session-stats .meta .span {
+  margin-left: auto;
+}
+
+/* The file this agent kept returning to; absent when it returned to nothing. */
+#session-stats .top {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+#session-stats .top .dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #5c6067;
+}
+
+#session-stats .top .file {
+  flex: 0 0 auto;
+  color: #8a8f98;
+}
+
+#session-stats .top .count {
+  flex: 0 0 auto;
+  color: #5c6067;
 }
 
 /*

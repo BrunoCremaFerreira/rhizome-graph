@@ -271,3 +271,82 @@ def test_a_box_that_cannot_shrink_bounds_its_own_width(box: Box) -> None:
         f"{box.selector} carries no horizontal width bound, so {box.overflow}. "
         f"Declarations found: {sorted(_declarations_of(box.selector))}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The shortcut legend's own length, which is an INPUT to a browser measurement.
+#
+# Nothing above reads `web/index.html`; this section does, and it is a different
+# kind of statement from the rest of the file. Everything above is a policy about
+# the stylesheet. This is a jaw on a number that was measured in a browser and
+# written down in TypeScript, against a string that lives in the HTML -- three
+# places, and only one of them ever gets edited.
+#
+# `web/index.html` is spelled here rather than imported so this section stands on
+# its own; it is the same path `tests/test_bottom_row_containment.py` names.
+
+INDEX_HTML = REPO_ROOT / "web" / "index.html"
+
+#: The legend itself: the `.keys` span inside the bottom row's `.about` block.
+LEGEND = re.compile(r'<span class="keys">(.*?)</span>', re.DOTALL)
+
+#: What it measured, on 2026-08-29, with whitespace collapsed the way a browser
+#: collapses it. Changing this number is a decision, and the docstring below says
+#: which measurement has to be redone before it may be changed.
+MEASURED_LEGEND_LENGTH = 162
+
+
+def _legend_text() -> str:
+    """The legend as one line, collapsed the way HTML collapses it.
+
+    The source wraps the string across two lines for readability, and a browser
+    renders that as single spaces. Counting the source bytes instead would make
+    the number depend on where the file happens to be wrapped.
+    """
+    found = LEGEND.search(INDEX_HTML.read_text(encoding="utf-8"))
+    assert found is not None, (
+        "web/index.html no longer carries a <span class=\"keys\"> legend, so this "
+        "jaw guards nothing -- and the constant it guards is still in bottomRow.ts"
+    )
+    return " ".join(found.group(1).split())
+
+
+def test_the_shortcut_legend_has_not_grown_since_it_was_measured_in_a_browser() -> None:
+    """A JAW, not a RED: it passes today, and that is what it is for.
+
+    There is no behaviour here to specify. `CONTEXT_WIDTH_FRACTION = 0.34` in
+    `web/src/bottomRow.ts` is not arithmetic -- it is a browser measurement, and
+    its own comment says what it was measured against: "0.34 keeps the shortcut
+    legend at two lines at both 1280 and 1600, where 0.40 wraps it to three at
+    1280 and 0.50 to three at 1600. The legend is the widest thing in the row, so
+    it is what pays for a greedy centre." `MIN_SIDE_WIDTH_PX = 231` is pinned to
+    that same measurement rather than merely bounded by it.
+
+    So the legend's length is an INPUT to two constants that live in another
+    file, and nothing anywhere connects them. Growing the legend moves the width
+    at which it wraps to a third line and neither constant has any idea. The
+    session-stats panel wants ` - F8: session stats` here, which is 20 characters
+    -- a 12% growth in the widest thing in the row -- and the ambient-sound plan
+    wants another twelve beside it.
+
+    **The only way to change this number is to re-measure.** Open the built page
+    at 1280 and at 1600, check the legend is still on two lines with the centre
+    caption legible, and write the new length here with the date of that
+    measurement. Lowering `CONTEXT_WIDTH_FRACTION` instead squeezes the centre
+    caption at widths where nothing ever overlapped, and shortening an existing
+    entry is the other choice -- decide by measurement, not by taste.
+
+    This host is a tty, so nobody here can take that measurement; the F8 entry is
+    deliberately NOT added by the test that asks for it. What this converts is
+    "somebody will remember to re-measure" into "the suite stops you".
+    """
+    legend = _legend_text()
+
+    assert len(legend) == MEASURED_LEGEND_LENGTH, (
+        f"the shortcut legend is now {len(legend)} characters, not "
+        f"{MEASURED_LEGEND_LENGTH}:\n  {legend}\n"
+        "CONTEXT_WIDTH_FRACTION = 0.34 and MIN_SIDE_WIDTH_PX = 231 in "
+        "web/src/bottomRow.ts were measured in a browser against the 162-character "
+        "string, at 1280 and 1600, where the legend sits on two lines. Re-measure "
+        "at both widths, then write the new length above with the date."
+    )
