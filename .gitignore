@@ -17,3 +17,9 @@ web/dist/
 
 # Editors / OS
 .DS_Store
+
+# Graphify: /graphify writes its knowledge graph here (graph.html, graph.json,
+# GRAPH_REPORT.md, cache/). It is a derived artifact of this checkout, so it is
+# not committed -- and because tree.py now reads .gitignore, ignoring it also
+# keeps thousands of generated nodes off the graph this project itself draws.
+graphify-out/
