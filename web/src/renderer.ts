@@ -38,7 +38,7 @@ import type { AgentEvent } from "./protocol";
 import type { SimNode, Simulation } from "./simulation";
 import { ForceLayout } from "./layout";
 import { createAvatarCanvas } from "./avatar";
-import { NEUTRAL_NODE_COLOR, fileColor, hashColor, hexToInt } from "./colors";
+import { NEUTRAL_NODE_COLOR, actorColor, fileColor, hexToInt } from "./colors";
 import { UNMEASURED_COLOR } from "./sizeColor";
 import {
   allocateEdgeAttributes,
@@ -58,6 +58,10 @@ import {
 import { frameMatches, type SearchFrame } from "./search";
 import { createSearchMarkerCanvas } from "./searchMarker";
 import { createReadMarkerCanvas } from "./readMarker";
+import { createAlarmMarkerCanvas } from "./alarmMarker";
+// The idle fade and its two exemptions live in a pure module: a condition
+// written into the per-frame loop below would carry no test at all.
+import { nodeOpacityFactor } from "./nodeFade";
 // The two beam lifetimes live in a pure module because a constant declared
 // here cannot be imported by a test: `agentState.ts`'s DEPARTURE_SECONDS has
 // to outlive the longest beam, and that relation is asserted in vitest.
@@ -157,6 +161,21 @@ interface ReadCandidate {
   y: number;
 }
 
+/**
+ * One reusable bracket for a file an attention rule fired on.
+ *
+ * Pooled exactly like {@link ReadMarkerSlot}, slot bound to its path, one
+ * shared texture. The one difference is that it does NOT fade: a read decays
+ * and its ring shrinks with it, while an alarm lasts until a human dismisses
+ * it, so there is no channel to sort a full pool by and the oldest alarms
+ * simply keep the slots they hold.
+ */
+interface AlarmMarkerSlot {
+  sprite: Sprite;
+  /** Path currently bracketed, or `""` when the slot is parked. */
+  path: string;
+}
+
 const MAX_BEAMS = 512;
 /** The neutral grey a directory dot wears, shared with the size mode's unmeasured nodes. */
 const DIR_COLOR = NEUTRAL_NODE_COLOR;
@@ -189,6 +208,27 @@ const READ_PULSE_RATE = 4;
 const READ_PULSE_DEPTH = 0.22;
 /** Below this, the ring is not worth a slot another file could use. */
 const READ_MARKER_MIN = 0.02;
+/**
+ * How many alarm brackets can be on screen at once.
+ *
+ * Bounded like every other pool here. Half the read pool on purpose: alarms are
+ * meant to be rare, the panel lists what the graph cannot show, and a screen of
+ * brackets would say only that the rule file is too broad.
+ */
+const MAX_ALARM_MARKERS = 12;
+/** Side of an alarm bracket, in DEVICE pixels. Larger than the read ring: it
+ * has to be found by eye rather than noticed on a node already being looked at. */
+const ALARM_MARKER_PIXELS = 44;
+/**
+ * Colour of the alarm bracket: the red `D` already speaks on this page.
+ *
+ * Deliberately NOT a sixth semantic colour. The shape is what says "alarm" --
+ * two facing brackets against the read marker's rings and the search marker's
+ * one -- and the hue only has to read as "look at this", which the delete red
+ * already does. A bracket is never drawn on the same node a delete flash is
+ * fading on for long: the node is gone from the tree moments later.
+ */
+const ALARM_MARKER_COLOR = 0xff3333;
 /** Height of the agent figure in world units (a file dot is a few px wide). */
 const AVATAR_WORLD_HEIGHT = 7;
 /**
@@ -344,6 +384,9 @@ export class GourceRenderer {
   private readonly readMarkers: ReadMarkerSlot[] = [];
   private readonly readCandidates: ReadCandidate[] = [];
   private readonly readByPath = new Map<string, ReadCandidate>();
+  /** The alarm brackets, and the scratch set that hands them out each frame. */
+  private readonly alarmMarkers: AlarmMarkerSlot[] = [];
+  private readonly alarmPending = new Set<string>();
   private readonly beams: Beam[] = [];
 
   /**
@@ -384,6 +427,15 @@ export class GourceRenderer {
    * and every ramp evaluation happened once, when the measurement was adopted.
    */
   private sizeColors: ReadonlyMap<string, number> | null = null;
+  /**
+   * The paths an attention rule fired on and nobody has dismissed yet.
+   *
+   * A SET OF ANSWERS, like `setSearch`'s matches and `setSizeColors`'s map:
+   * nothing in here learns that a rule file exists, what a pattern is, or which
+   * click cleared a row. The verdict was reached in the daemon and the latch
+   * belongs to `attentionState.ts`, where both carry tests.
+   */
+  private alarmedPaths: ReadonlySet<string> = new Set<string>();
   /**
    * The daemon's picture of its own actors, as `agentState.ts` holds it.
    *
@@ -501,6 +553,19 @@ export class GourceRenderer {
       sprite.visible = false;
       this.scene.add(sprite);
       this.readMarkers.push({ sprite, path: "" });
+    }
+
+    // Same again for the alarm brackets: one texture for the whole pool, in the
+    // MAIN scene, because unlike text a glow through the bloom is exactly what
+    // a marker wanting to be found across a framed-whole tree should have.
+    const alarmTexture = makeAlarmMarkerTexture();
+    for (let i = 0; i < MAX_ALARM_MARKERS; i += 1) {
+      const sprite = new Sprite(
+        new SpriteMaterial({ map: alarmTexture, transparent: true, depthTest: false, opacity: 0 }),
+      );
+      sprite.visible = false;
+      this.scene.add(sprite);
+      this.alarmMarkers.push({ sprite, path: "" });
     }
 
     this.bindInput();
@@ -710,6 +775,18 @@ export class GourceRenderer {
   }
 
   /**
+   * Which paths are wearing an alarm right now.
+   *
+   * The `setSizeColors` shape a third time: an ANSWER, never a question. The
+   * set is what `updateNodeAttributes` asks per node per frame ("is this one
+   * exempt from the idle fade?") and what `updateAlarmMarkers` draws a bracket
+   * from; nothing here knows a rule file exists.
+   */
+  setAlarms(paths: ReadonlySet<string>): void {
+    this.alarmedPaths = paths;
+  }
+
+  /**
    * Who is working, who is blocked and who has just stopped.
    *
    * The `setSizeColors` shape: this takes an answer and never a question. It
@@ -827,6 +904,14 @@ export class GourceRenderer {
     // The file that was open belonged to the old project; its highlight would
     // otherwise be waiting for a path the new tree may never have.
     this.openFilePath = null;
+    // The alarms named paths of the old project; `main.ts` empties the model on
+    // the same reset, and parking the sprites here keeps the two from
+    // disagreeing for the frames in between.
+    this.alarmedPaths = new Set<string>();
+    for (const slot of this.alarmMarkers) {
+      slot.sprite.visible = false;
+      slot.path = "";
+    }
     // Highlights of matches in the old tree, and `releaseToAuto` with them.
     this.clearSearch();
   }
@@ -899,6 +984,9 @@ export class GourceRenderer {
     // After the labels: the rings are sized from the same per-frame metrics.
     this.updateSearchMarker();
     this.updateReadMarkers(model);
+    // After the read rings, for the same reason they come after the labels:
+    // both are sized from the metrics `updateLabels` settled this frame.
+    this.updateAlarmMarkers(model);
     this.updateWaitRings();
 
     this.composer.render();
@@ -1003,7 +1091,14 @@ export class GourceRenderer {
         if (node.reading > 0) {
           this.scratchColor.lerp(tmpColor.setHex(READ_COLOR), node.reading * READ_TINT);
         }
-        this.scratchColor.multiplyScalar(0.35 + 0.65 * node.opacity);
+        // The one expression this feature changes in here. An alarmed node is
+        // exempt from the idle fade, exactly as a match is above: an alarm
+        // outlives the event that raised it by design, and one that faded out
+        // over the next minute is an alarm nobody sees. The arithmetic and both
+        // exemptions live in `nodeFade.ts`, which carries the tests.
+        this.scratchColor.multiplyScalar(
+          nodeOpacityFactor(node.opacity, { alarmed: this.alarmedPaths.has(node.path) }),
+        );
         sizeArr[idx] = (6 + node.highlight * 8 + node.reading * READ_SIZE_BOOST) * dpr;
       }
       colArr[idx * 3] = this.scratchColor.r;
@@ -1366,6 +1461,76 @@ export class GourceRenderer {
     }
   }
 
+  /**
+   * Bracket every file wearing an alarm, at a constant size in PIXELS.
+   *
+   * Built on `updateReadMarkers`' structure and diverging from it in exactly
+   * two places, both of them consequences of one fact -- an alarm does not
+   * decay:
+   *
+   *  - there is no channel to rank a full pool by, so the slots already bound
+   *    to a path keep it and only free slots are handed out. The oldest alarms
+   *    are the ones that stay on screen, which is the right way round: the
+   *    panel lists everything, and a marker that moved every time a new alarm
+   *    opened would be a marker nobody could follow back to its dot;
+   *  - the opacity is constant. A bracket that faded with the node under it
+   *    would disappear over exactly the file nobody has touched in a while,
+   *    which is the file most in need of a second look.
+   *
+   * Sized from `labelMetrics.worldPerPixel` like every other marker here: the
+   * camera spans halfHeight 2..4000, so a bracket sized in world units is
+   * sub-pixel with the tree framed and covers the screen on a single file.
+   */
+  private updateAlarmMarkers(model: readonly SimNode[]): void {
+    const pending = this.alarmPending;
+    pending.clear();
+    if (this.alarmedPaths.size > 0) {
+      for (const node of model) {
+        if (node.kind !== "file") continue;
+        if (!this.alarmedPaths.has(node.path)) continue;
+        pending.add(node.path);
+      }
+    }
+
+    for (const slot of this.alarmMarkers) {
+      const held = slot.path !== "" && pending.has(slot.path);
+      if (!held) {
+        slot.sprite.visible = false;
+        slot.path = "";
+        continue;
+      }
+      pending.delete(slot.path);
+      this.drawAlarmMarker(slot, slot.path);
+    }
+
+    const incoming = pending.values();
+    for (const slot of this.alarmMarkers) {
+      if (slot.path) continue;
+      const next = incoming.next();
+      if (next.done) break;
+      slot.path = next.value;
+      this.drawAlarmMarker(slot, slot.path);
+    }
+  }
+
+  /** Place and size one assigned bracket, or park it if its node has moved out. */
+  private drawAlarmMarker(slot: AlarmMarkerSlot, path: string): void {
+    const p = this.layout.position(path);
+    if (!p) {
+      slot.sprite.visible = false;
+      return;
+    }
+    const size = this.labelMetrics.worldPerPixel * ALARM_MARKER_PIXELS;
+    slot.sprite.visible = true;
+    // Between the read ring (0.5) and the search ring (1): an alarm outranks
+    // the context of what is being read and is outranked by the node the user
+    // asked for by name.
+    slot.sprite.position.set(p.x, p.y, 0.75);
+    slot.sprite.scale.set(size, size, 1);
+    // Constant, unlike the read ring's: an alarm does not decay.
+    (slot.sprite.material as SpriteMaterial).opacity = 0.9;
+  }
+
   /** Place, size and fade one assigned read ring. */
   private drawReadMarker(slot: ReadMarkerSlot, pick: ReadCandidate): void {
     const pulse = 1 + READ_PULSE_DEPTH * Math.sin(this.elapsed * READ_PULSE_RATE);
@@ -1410,7 +1575,7 @@ export class GourceRenderer {
       this.renameActor(existing, label);
       return existing;
     }
-    const color = hashColor(`actor:${agent}`);
+    const color = actorColor(agent);
 
     // The figure stays in the main scene: it is part of what should glow.
     const figure = makeAvatar(color);
@@ -1833,6 +1998,23 @@ function makeWaitMarker(color: number): Sprite {
   return new Sprite(
     new SpriteMaterial({ map: texture, transparent: true, depthTest: false, opacity: 0 }),
   );
+}
+
+/**
+ * The one texture every alarm bracket in the pool shares.
+ *
+ * Built once, like the read marker's: all the sprites show the same shape in
+ * the same colour, and only their position and scale change frame to frame.
+ */
+function makeAlarmMarkerTexture(): CanvasTexture {
+  const texture = new CanvasTexture(createAlarmMarkerCanvas(ALARM_MARKER_COLOR));
+  // A 2D canvas hands us sRGB texels; left linear the antialiased edge of each
+  // arm shifts gamma and thickens.
+  texture.colorSpace = SRGBColorSpace;
+  texture.minFilter = LinearFilter;
+  texture.magFilter = LinearFilter;
+  texture.generateMipmaps = false;
+  return texture;
 }
 
 function makeReadMarkerTexture(): CanvasTexture {

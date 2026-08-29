@@ -76,6 +76,26 @@ export function hashColor(key: string): number {
   return hslToInt(hue, 0.7, 0.6);
 }
 
+/**
+ * The colour of ONE agent: its figure, its beams, and any swatch beside its name.
+ *
+ * The `actor:` prefix is what keeps an agent apart from a directory of the same
+ * name, since {@link hashColor} colours both. It used to be spelled inline in
+ * `renderer.ts` — a module that needs a GL context and therefore carries no test
+ * at all — so every second surface wanting an agent's colour had to respell it,
+ * and the first typo is a page where the swatch and the figure disagree with
+ * nothing on screen saying which one is lying. One spelling, here, imported by
+ * both.
+ *
+ * `agent` is the IDENTITY, never the label: two subagents of one type must stay
+ * two figures with two colours. An empty agent is nobody on camera and never
+ * gets a figure, but this still answers for it rather than throwing — a caller
+ * building a row does not want a crash for a value it is about to discard.
+ */
+export function actorColor(agent: string): number {
+  return hashColor(`actor:${agent}`);
+}
+
 /** Color for a file dot: extension palette first, hashed fallback otherwise. */
 export function fileColor(path: string): number {
   const ext = extensionOf(path);

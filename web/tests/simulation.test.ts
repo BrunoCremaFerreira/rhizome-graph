@@ -28,7 +28,7 @@ function event(
   // `origin` distinguishes live agent activity from the seeded project tree;
   // these tests are all about live activity, hence "hook".
   // `label` is display text only; the model keys actors off `agent`.
-  return { ts, agent, type, path, color, origin: "hook", label: "" };
+  return { ts, agent, type, path, color, origin: "hook", label: "", attention: false };
 }
 
 describe("simulation model", () => {

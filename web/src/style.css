@@ -877,3 +877,159 @@ body {
    * already tints the background. */
   box-shadow: 0 0 0 1px var(--mark-active-edge);
 }
+
+/*
+ * The alarm panel (attention rules), top left — the files an agent touched that
+ * the user asked to be told about, plus a header saying which rule file
+ * produced them.
+ *
+ * Top left because it is the only free corner: the two search bars are centred
+ * at `top: 14px`, #size-legend is `top: 14px; right: 14px`, #root-bar sits
+ * below them at `top: 56px`, and #bottom-bar owns the bottom edge. Three
+ * collisions remain and each is a stated bargain rather than a surprise:
+ * #hud's #log is bottom-left with `max-height: 30vh`, so at a very short
+ * viewport the two meet — the same bargain #size-legend already accepts; the
+ * MODAL file view paints over this panel, which closing it undoes; and the
+ * DOCKED file view is `40vw` on the right and cannot reach here at all.
+ *
+ * `pointer-events: none` on the container with `auto` on the list and the
+ * button is the load-bearing line #bottom-bar and the docked panel both carry:
+ * without it a box that can grow to 45vh swallows every drag meant for the
+ * canvas underneath, and a panel about supervision would be a panel that breaks
+ * the graph it supervises.
+ */
+#attention {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  flex-direction: column;
+  max-width: 32vw;
+  max-height: 45vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 10px;
+  border: 1px solid #3a2a2a;
+  border-radius: 6px;
+  background: rgba(12, 13, 15, 0.82);
+  color: #8a8f98;
+  font: 12px/1.4 system-ui, sans-serif;
+  pointer-events: none;
+  user-select: none;
+  scrollbar-width: none;
+}
+
+/*
+ * The `display: flex` above would otherwise override the `hidden` attribute and
+ * leave the panel on screen over a quiet session for good — the same trap as
+ * #context-branch, #search, #root-bar, #size-legend and #file-view.
+ */
+#attention[hidden] {
+  display: none;
+}
+
+#attention::-webkit-scrollbar {
+  display: none;
+}
+
+#attention .head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: #5c6067;
+  white-space: nowrap;
+}
+
+/* The one red thing up here: the title says what the panel is. */
+#attention .title {
+  color: #ff8a7a;
+}
+
+/*
+ * The clear-all. `pointer-events: auto` because it is the only affordance that
+ * dismisses more than one alarm, and it gets no keyboard shortcut: Escape is
+ * contested three ways in the keydown chain already, and this panel does not
+ * cover the graph.
+ */
+#attention #attention-clear {
+  margin-left: auto;
+  padding: 0 4px;
+  border: 1px solid #2a2e34;
+  border-radius: 4px;
+  background: transparent;
+  color: #5c6067;
+  font: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+#attention #attention-clear:hover {
+  color: #d5d9df;
+}
+
+/*
+ * Which rule file the alarms came from, how many rules are in force and which
+ * patterns were refused. It is on screen whenever the panel is, and not only
+ * when something failed: a refused pattern alarms LESS, so its silence is
+ * indistinguishable from a well-behaved session unless the header says so.
+ */
+#attention #attention-rules {
+  margin-bottom: 4px;
+  color: #5c6067;
+  overflow-wrap: anywhere;
+}
+
+#attention #attention-rules:empty {
+  display: none;
+}
+
+#attention #attention-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  /* The rows are clicked to dismiss one alarm, so this half takes hit-testing
+   * back from the container above. */
+  pointer-events: auto;
+}
+
+#attention li {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* The row answers the pointer without becoming a button. */
+#attention li:hover .name,
+#attention li:hover .dir {
+  color: #d5d9df;
+}
+
+/* The agent's own colour, so the row and the figure in the graph agree. */
+#attention .swatch {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+/* The directory is what gets clipped when a path is too long; the name stays. */
+#attention .dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #5c6067;
+}
+
+#attention .name {
+  flex: 0 0 auto;
+  color: #d5d9df;
+}
+
+#attention .count {
+  flex: 0 0 auto;
+  color: #5c6067;
+}

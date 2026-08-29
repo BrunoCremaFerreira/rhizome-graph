@@ -7,6 +7,7 @@
 
 import {
   parseAgentStates,
+  parseAttentionRules,
   parseCompletion,
   parseEvent,
   parseFileView,
@@ -18,6 +19,7 @@ import {
   parseStatus,
   type AgentEvent,
   type AgentStates,
+  type AttentionRulesFrame,
   type DaemonMeta,
   type FileView,
   type GitStatus,
@@ -39,6 +41,7 @@ export type StatusSink = (status: GitStatus) => void;
 export type SearchResultSink = (result: SearchResult) => void;
 export type SizesSink = (sizes: SizesResult) => void;
 export type AgentStatesSink = (frame: AgentStates) => void;
+export type AttentionRulesSink = (frame: AttentionRulesFrame) => void;
 
 export interface WsClientOptions {
   /** Backoff floor / ceiling in ms. */
@@ -91,6 +94,14 @@ export interface WsClientOptions {
    * sits with the others rather than after `parseEvent`.
    */
   readonly onAgentStates?: AgentStatesSink;
+  /**
+   * Which attention rules the daemon loaded, and which it refused. Optional and
+   * consumed either way, for the same reason as the frames above: `parseEvent`
+   * ignores `kind`, so a page built before this frame existed would otherwise
+   * let it fall through and grow a phantom node called "attention" in the
+   * graph — a node named after the rules ABOUT the tree, sitting in the tree.
+   */
+  readonly onAttentionRules?: AttentionRulesSink;
 }
 
 /** Used only outside a browser (tests, SSR); real pages derive from location. */
@@ -144,6 +155,7 @@ export class WsClient {
   private readonly onSearchResult: SearchResultSink | undefined;
   private readonly onSizes: SizesSink | undefined;
   private readonly onAgentStates: AgentStatesSink | undefined;
+  private readonly onAttentionRules: AttentionRulesSink | undefined;
 
   constructor(
     private readonly url: string,
@@ -161,6 +173,7 @@ export class WsClient {
     this.onSearchResult = options.onSearchResult;
     this.onSizes = options.onSizes;
     this.onAgentStates = options.onAgentStates;
+    this.onAttentionRules = options.onAttentionRules;
     this.delay = this.minDelay;
   }
 
@@ -294,6 +307,16 @@ export class WsClient {
     const agentStates = parseAgentStates(raw);
     if (agentStates) {
       this.onAgentStates?.(agentStates);
+      return;
+    }
+    // Above `parseEvent` like every frame before it, and consumed with or
+    // without a sink: this is an answer ABOUT the rules, not a change to any
+    // path, and it carries no `ts`/`agent`/`type`/`path`/`color`, so falling
+    // through would have it answered `null` and dropped in silence — the panel
+    // header then reporting nothing about a rule file nobody could read.
+    const attentionRules = parseAttentionRules(raw);
+    if (attentionRules) {
+      this.onAttentionRules?.(attentionRules);
       return;
     }
     const event = parseEvent(raw);

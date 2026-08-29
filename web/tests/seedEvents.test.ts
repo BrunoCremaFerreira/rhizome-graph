@@ -28,6 +28,8 @@ function event(
     color,
     origin: "hook",
     label: "",
+    // The daemon sets this only on a path the attention rules matched.
+    attention: false,
     ...overrides,
   };
 }

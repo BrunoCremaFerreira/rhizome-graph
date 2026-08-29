@@ -56,6 +56,17 @@ export interface AgentEvent {
    * the legitimate orchestrator case (its payload carries no `agent_type`).
    */
   label: string;
+  /**
+   * Whether this path matched the user's attention rules, as the DAEMON judged
+   * it: the rules live in a file under the observed root, are compiled there,
+   * and never travel to the browser. The verdict rides the event that already
+   * names the path, because a second frame would have to name it again and
+   * would arrive out of order, turning this page into a join.
+   *
+   * The key is CONDITIONAL on the wire, present only when it is `true`, so
+   * "absent" is the overwhelmingly common case and degrades to `false` here.
+   */
+  attention: boolean;
 }
 
 /**
@@ -91,6 +102,13 @@ function isFiniteNumber(value: unknown): value is number {
  *   - An absent or unrecognized `origin` degrades to `"hook"` rather than
  *     rejecting the event, so a page served from a newer or older daemon than
  *     the one broadcasting still draws everything it receives.
+ *   - An absent or mistyped `attention` degrades to `false` by the same rule,
+ *     and the direction is deliberate. The fail-safe direction of an alarm is
+ *     the loud one, but a page that alarmed on a malformed frame would alarm
+ *     about nothing the user ever wrote, which is worse than silence: it
+ *     teaches the reader to ignore the marker. A truthy non-boolean (`"yes"`,
+ *     `1`) is therefore `false`, and the frame itself is never dropped over it
+ *     — the event is a real change to a real file.
  *   - An absent or mistyped `label` degrades to `""` for the same reason: it is
  *     display text, never a reason to drop a frame. A page built against the
  *     daemon that broadcasts it still draws every event from one that does not
@@ -102,7 +120,7 @@ function isFiniteNumber(value: unknown): value is number {
 export function parseEvent(raw: unknown): AgentEvent | null {
   if (!isRecord(raw)) return null;
 
-  const { ts, agent, type, path, color, origin, label } = raw;
+  const { ts, agent, type, path, color, origin, label, attention } = raw;
 
   if (!isFiniteNumber(ts)) return null;
   if (typeof agent !== "string") return null;
@@ -123,6 +141,7 @@ export function parseEvent(raw: unknown): AgentEvent | null {
     color,
     origin: resolvedOrigin,
     label: typeof label === "string" ? label : "",
+    attention: typeof attention === "boolean" ? attention : false,
   };
 }
 
@@ -718,4 +737,74 @@ export function parseAgentStates(raw: unknown): AgentStates | null {
   }
 
   return { agents };
+}
+
+/**
+ * Which attention rules the daemon loaded, and which it could not.
+ *
+ * This frame exists for one failure mode, and it is the sharpest one in the
+ * feature. The matcher refuses a pattern it cannot translate correctly — a
+ * POSIX bracket class, an over-long pattern, anything the regex engine will not
+ * compile — and where that refusal shows MORE files in the module it was
+ * written for, here it shows LESS: a user protecting private keys writes a
+ * bracket class, the pattern is dropped, and the panel then stays empty, which
+ * is the same picture as a well-behaved session. A supervision feature whose
+ * failure mode is indistinguishable from success is not a supervision feature.
+ *
+ * So the daemon states, always and not only on failure, which file the rules
+ * came from, how many are in force, and which patterns it refused. `source` is
+ * `""` when no rule file was found at all — a case that must stay tellable from
+ * a file that was found and held nothing.
+ */
+export interface AttentionRulesFrame {
+  /** The rule file the daemon read, or `""` when it found none. */
+  source: string;
+  /** How many patterns are actually in force. */
+  count: number;
+  /** The patterns it refused, verbatim, so the panel can quote them. */
+  refused: string[];
+  /** Whether the rule file was longer than the daemon would read. */
+  truncated: boolean;
+}
+
+/**
+ * Validate and parse a raw WebSocket message into an {@link AttentionRulesFrame}.
+ *
+ * Contract (see tests/attentionProtocol.test.ts):
+ *   - `kind` must be exactly `"attention"`, load-bearing in both directions
+ *     like {@link parseSizes}'s: a rule report routed as activity would grow a
+ *     node called "attention" in the graph, and an activity event mistaken for
+ *     a rule report would rewrite the panel's header from one file save.
+ *   - THERE IS NO HARD FIELD BEYOND `kind`, as in {@link parseAgentStates}. A
+ *     frame naming no source IS the answer this feature most needs to show, and
+ *     dropping it would leave the panel unable to tell "no rule file" from "a
+ *     file full of rules that matched nothing".
+ *   - `count` must be a non-negative integer or it is `0`: it is a statement
+ *     about how much supervision is in force, and a `NaN` or a string would be
+ *     printed at the reader as if it meant something.
+ *   - `refused` DEGRADES as `parseStatus`'s `entries` does: absent or mistyped
+ *     becomes `[]`, and a junk item is dropped ONE AT A TIME. A partial list is
+ *     worth more than none here, because an empty refusal list does not read as
+ *     "I could not parse one item", it reads as "nothing was refused" — exactly
+ *     the lie this frame exists to prevent. Order is the daemon's.
+ *   - `truncated` is a boolean or it is `false`.
+ *   - NEVER throws: this comes off the network.
+ */
+export function parseAttentionRules(raw: unknown): AttentionRulesFrame | null {
+  if (!isRecord(raw)) return null;
+  if (raw.kind !== "attention") return null;
+
+  const refused: string[] = [];
+  if (Array.isArray(raw.refused)) {
+    for (const item of raw.refused) {
+      if (typeof item === "string") refused.push(item);
+    }
+  }
+
+  return {
+    source: typeof raw.source === "string" ? raw.source : "",
+    count: isCount(raw.count) ? raw.count : 0,
+    refused,
+    truncated: raw.truncated === true,
+  };
 }

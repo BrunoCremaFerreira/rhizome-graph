@@ -56,6 +56,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from rhizome_graph import hookinstall
+from rhizome_graph.attention import DEFAULT_RULE_FILE
 from rhizome_graph.assets import hook_command
 from rhizome_graph.ipc import port_is_free, socket_is_live
 from rhizome_graph.paths import expand_user
@@ -153,6 +154,10 @@ EXPLICIT_WINDOW_REFUSAL = (
     "--window was asked for by name and the window could not be opened: {reason}"
 )
 
+#: What a named rule file nobody can read is answered with. One line, because
+#: this is a typo in a flag and not an incident report.
+ATTENTION_REFUSAL = "--attention-rules names no readable file: {path}"
+
 #: Where a settings file lives, under an observed project and under the user's
 #: home alike. One spelling, which is what makes "the project's file" and "the
 #: user's file" one mechanism rather than two.
@@ -226,6 +231,7 @@ LOG_LEVEL_ENV = "RHIZOME_LOG_LEVEL"
 STATUS_INTERVAL_ENV = "RHIZOME_STATUS_INTERVAL"
 ALLOW_REMOTE_CONTROL_ENV = "RHIZOME_ALLOW_REMOTE_CONTROL"
 WEB_DIST_ENV = "RHIZOME_WEB_DIST"
+ATTENTION_ENV = "RHIZOME_ATTENTION"
 HOME_ENV = "HOME"
 
 
@@ -246,6 +252,16 @@ class Settings:
     than becoming a resolved path: deciding which candidate exists is a
     filesystem question, and this value is built without a filesystem (see
     :mod:`rhizome_graph.assets`).
+
+    ``attention_rules`` is that same rule applied to the file of paths the user
+    asked to be told about: empty means "use the default under the observed
+    root", and a value given is carried exactly as it was written -- unexpanded
+    and unresolved. ``~`` and a relative path both need a home and a working
+    directory to mean anything, and this function has neither by contract;
+    resolving here would also pin the file to the root the daemon booted with,
+    which is precisely what an explicit rule file must not do when ``ctrl+L``
+    moves the root. ``Session`` resolves it, because ``Session`` is the thing
+    that knows the root and the thing that changes it.
     """
 
     root: str
@@ -258,6 +274,7 @@ class Settings:
     log_level: str
     allow_remote_control: bool
     web_dist: str
+    attention_rules: str
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -294,6 +311,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--socket",
         default=None,
         help=f"ingest socket the hooks connect to (default: {DEFAULT_SOCKET_PATH})",
+    )
+    parser.add_argument(
+        "--attention-rules",
+        metavar="PATH",
+        default=None,
+        help=(
+            "file of path patterns to be told about "
+            f"(default: {DEFAULT_RULE_FILE} under the observed project)"
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -377,6 +403,9 @@ def settings_from(
         ),
         allow_remote_control=_allow_remote_control(environ),
         web_dist=_text(None, environ.get(WEB_DIST_ENV), ""),
+        attention_rules=_text(
+            _flag(args, "attention_rules"), environ.get(ATTENTION_ENV), ""
+        ),
     )
 
 
@@ -605,6 +634,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     if _flag(args, "install_hooks"):
         raise SystemExit(_write_hooks(settings.root))
 
+    # Beside the port and socket refusals, and before either of them: refusing
+    # after a port is open leaves a daemon to tear down for a mistake that was
+    # visible before it started. "A default may be adjusted; an explicit request
+    # may not" -- and the silence this replaces is the sharpest failure this
+    # feature can produce, because an alarm panel that never alarms looks exactly
+    # like a project where nothing has gone wrong. The **default** file being
+    # absent is the ordinary case and degrades to no rules at all.
+    if settings.attention_rules and not _is_readable_file(settings.attention_rules):
+        raise SystemExit(ATTENTION_REFUSAL.format(path=settings.attention_rules))
+
     try:
         port = choose_port(
             settings.port,
@@ -662,6 +701,19 @@ def main(argv: Sequence[str] | None = None) -> None:
         strategy,
         explicit=requested == WINDOW_REQUESTED,
     )
+
+
+def _is_readable_file(path: str) -> bool:
+    """Is there a file here this process may actually read?
+
+    Both halves are needed and neither is enough. A directory named where a file
+    was wanted is the commoner typo, and `isfile` is what catches it -- it also
+    answers `False` for a named pipe, which `load_rules` would refuse a moment
+    later anyway. A file with a mode of `0o000` exists and is a file, and only
+    the access check tells the user now rather than leaving them with a graph
+    that never alarms.
+    """
+    return os.path.isfile(path) and os.access(path, os.R_OK)
 
 
 def _report_hooks(root: str, home: str) -> int:

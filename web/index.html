@@ -36,6 +36,25 @@
         <ol id="status-list"></ol>
       </div>
     </div>
+    <!--
+      The alarm panel (attention rules), top-left. It may NOT join #bottom-bar
+      for the same reason #size-legend may not: that row is one grid whose two
+      side reserves were measured in a browser, so a fourth box there would
+      change what the centre caption may spend with nothing on screen saying so.
+      Empty here and filled by attentionHud.ts, which shows it only while
+      something is actually wearing an alarm.
+    -->
+    <div id="attention" hidden>
+      <div class="head">
+        <span class="title">attention</span>
+        <span id="attention-count"></span>
+        <button id="attention-clear" type="button" title="dismiss every alarm">
+          clear
+        </button>
+      </div>
+      <div id="attention-rules"></div>
+      <ol id="attention-list"></ol>
+    </div>
     <div id="search" hidden>
       <input
         id="search-input"

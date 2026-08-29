@@ -34,6 +34,17 @@ import {
 } from "./rootPrompt";
 import { createFileViewHud } from "./fileViewHud";
 import { createStatusHud } from "./statusHud";
+import { createAttentionHud } from "./attentionHud";
+import {
+  acknowledge,
+  acknowledgeAll,
+  alarms,
+  createAttention,
+  observe,
+  resetAttention,
+  type AttentionState,
+} from "./attentionState";
+import type { AttentionRulesFrame } from "./protocol";
 import { interpretFileViewKey } from "./fileViewKeys";
 import {
   applyTokens,
@@ -144,6 +155,34 @@ function boot(): void {
   const statusHud = statusEl ? createStatusHud(statusEl, openFile) : null;
   const sizeLegendEl = document.getElementById("size-legend");
   const sizeHud = sizeLegendEl ? createSizeHud(sizeLegendEl) : null;
+  const attentionEl = document.getElementById("attention");
+  const attentionHud = attentionEl
+    ? createAttentionHud(
+        attentionEl,
+        // A click on a row is a human saying "seen". It does not suppress the
+        // path: a later event on it opens a fresh alarm, which is exactly what
+        // makes an agent going back to a watched file worth watching.
+        (path) => showAttention(acknowledge(attention, path)),
+        () => showAttention(acknowledgeAll(attention)),
+      )
+    : null;
+
+  // And the same shape for the alarms: `attentionState.ts` owns the latch, the
+  // fold and the cap, `attentionList.ts` owns the rows and the header; this is
+  // the variable holding what they returned plus the two channels that paint
+  // it. The renderer is handed a SET of paths and never learns that a rule file
+  // exists.
+  let attention: AttentionState = createAttention();
+  /** The daemon's last rule report; `null` until one arrives. */
+  let attentionRules: AttentionRulesFrame | null = null;
+
+  function showAttention(next: AttentionState): void {
+    attention = next;
+    // The exemption from the idle fade and the bracket in the graph are the
+    // same one answer, so the set is built once per change and never per frame.
+    renderer.setAlarms(new Set(alarms(attention).map((alarm) => alarm.path)));
+    attentionHud?.render(alarms(attention), attentionRules);
+  }
 
   // The search's whole state machine is in `search.ts`; this is just the one
   // variable holding the state it returns, and the wiring that shows it.
@@ -299,6 +338,11 @@ function boot(): void {
       renderer.onEvent(event);
       eventHud?.push(event);
       attribution.observe(event);
+      // `observe` hands back the SAME reference for an event that did not
+      // alarm -- which is nearly every event -- so this costs the page no
+      // repaint at all in the ordinary case.
+      const alarmed = observe(attention, event);
+      if (alarmed !== attention) showAttention(alarmed);
       attributionHud?.update(eventHud?.hasEntries() ?? false, attribution.attributed());
       // The tree changed under the query: a new file may answer it and a
       // deleted one no longer exists to be framed. `refreshMatches`, not
@@ -338,6 +382,14 @@ function boot(): void {
       // nothing, which is what keeps a republished slot -- and every replay --
       // from repainting every figure on the page.
       onAgentStates: (frame) => showAgentStates(applyAgentStates(agentStates, frame)),
+      // Which attention rules the daemon loaded, and which it refused. The
+      // header states all of it whether or not anything has alarmed: a refused
+      // pattern alarms LESS, so its silence is otherwise indistinguishable from
+      // a well-behaved session.
+      onAttentionRules: (frame) => {
+        attentionRules = frame;
+        showAttention(attention);
+      },
       // What is uncommitted right now. The frame is deduped by the daemon, so
       // this only fires when the working tree really changed.
       onStatus: (status) => statusHud?.render(status),
@@ -366,6 +418,13 @@ function boot(): void {
         // The actors of the old project are not the new one's: a ring left
         // behind would sit on a figure standing over a tree it never touched.
         showAgentStates(closeAgentStates(agentStates));
+        // The alarms name files of the old project, and the header describes a
+        // rule file that governs a root nobody is watching any more. The
+        // daemon republishes its rules for the new root, so `null` here is
+        // "not told yet" rather than "no rule file", which is the one thing
+        // this panel may never guess at.
+        attentionRules = null;
+        showAttention(resetAttention(attention));
         attribution.reset();
         attributionHud?.update(false, false);
         // Only now does the bar close: the switch is confirmed, not merely sent.

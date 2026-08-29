@@ -74,6 +74,7 @@ from rhizome_graph.agentstate import (
     agent_state,
     agent_state_frame,
 )
+from rhizome_graph import attention
 from rhizome_graph.assets import WEB_DIST_ENV, default_web_dist
 from rhizome_graph.cli import (
     DEFAULT_HTTP_PORT,
@@ -181,6 +182,12 @@ class EventHub:
         a flash: a client connecting a second after the notification must be
         told, or it draws a working figure over a blocked agent and stays wrong
         until the agent unblocks.
+      * ``_attention`` / ``_attention_frame`` -- the paths the user asked to be
+        told about, and the header naming the file they came from. A slot of the
+        same kind as ``_status``, for the same reason: it is re-published on
+        every root switch, and "no rule file was found" is a fact a client
+        connecting at any moment has to be told, because an alarm panel that
+        never alarms is what a healthy session looks like too.
       * ``_reset`` -- the last "the observed project changed, clear everything"
         frame, in a replaceable slot like ``_meta`` (see :meth:`reset`).
       * ``_last_hook`` -- the actor that acted most recently, as
@@ -208,6 +215,8 @@ class EventHub:
         self._status: str | None = None
         self._agent_states: dict[str, AgentState] = {}
         self._agent_state: str | None = None
+        self._attention = attention.EMPTY
+        self._attention_frame: str | None = None
         self._reset: str | None = None
         self._clients: set[ServerConnection] = set()
         self._attribution_window = attribution_window
@@ -235,12 +244,18 @@ class EventHub:
         cannot go after the seed: :meth:`register` sends this list in order and
         the client draws as it arrives, so a waiting ring behind twenty thousand
         seed events appears seconds late on a graph that has already settled.
+
+        The attention header sits with them and ahead of the tree for exactly
+        that rule: a header behind twenty thousand seed events is a header
+        nobody sees, and this one is what tells the reader whether any rule is
+        in force at all.
         """
         reset = [self._reset] if self._reset is not None else []
         meta = [self._meta] if self._meta is not None else []
         status = [self._status] if self._status is not None else []
         agents = [self._agent_state] if self._agent_state is not None else []
-        return [*reset, *meta, *status, *agents, *self._seed, *self._recent]
+        rules = [self._attention_frame] if self._attention_frame is not None else []
+        return [*reset, *meta, *status, *agents, *rules, *self._seed, *self._recent]
 
     async def register(self, websocket: ServerConnection) -> None:
         """Add a client and replay the tree plus recent activity."""
@@ -329,6 +344,41 @@ class EventHub:
         self._agent_state = message
         broadcast(self._clients, message)
 
+    def set_attention(self, rules: attention.AttentionRules) -> None:
+        """Arm the rules, and tell every client which file they came from.
+
+        Both halves in one call, because they are one fact: a daemon matching
+        against rules it has not announced would leave the panel describing a
+        policy that is not the one in force.
+
+        The frame states three things always and not only on failure -- which
+        file the rules came from, how many are in force, and which patterns were
+        refused. ``source: ""`` is the case this exists for: a `ctrl+L` into a
+        project with no rule file, or a typo naming a readable file with the
+        wrong contents, both end there, and only the daemon can say so. A
+        refused pattern alarms *less*, so the silence it produces is
+        indistinguishable from a well-behaved session unless it is reported.
+
+        Deduped on the encoded message, exactly as :meth:`set_status` is: the
+        rules are re-read on every root switch and a header that has not changed
+        costs nothing on the wire.
+        """
+        self._attention = rules
+        message = json.dumps(
+            {
+                "kind": "attention",
+                "source": rules.source,
+                "count": len(rules.rules),
+                "refused": list(rules.refused),
+                "truncated": rules.truncated,
+            },
+            separators=(",", ":"),
+        )
+        if message == self._attention_frame:
+            return
+        self._attention_frame = message
+        broadcast(self._clients, message)
+
     def reset(self, project_root: str) -> None:
         """Point the hub at another project and forget the one before it.
 
@@ -357,6 +407,11 @@ class EventHub:
         arrived here. The slot goes with the dict, or the next client connecting
         is replayed the old project's actors.
 
+        The attention rules go with them, and the header that names them: an
+        explicit rule file is silently re-anchored to the new root, so the
+        numbers would be wrong as well as stale, and a default rule file belongs
+        to a project nobody is watching any more.
+
         The frame is kept in a slot of its own so a client connecting *after* the
         switch is told to clear too. Unlike :meth:`set_meta` this does not dedupe
         on the value: resetting to the same root is a request for a clean slate,
@@ -369,6 +424,8 @@ class EventHub:
         self._status = None
         self._agent_states.clear()
         self._agent_state = None
+        self._attention = attention.EMPTY
+        self._attention_frame = None
         self._last_hook = None
         self._hook_paths.clear()
         self._fs_paths.clear()
@@ -504,14 +561,45 @@ class EventHub:
           * ``_hook_paths`` suppresses the watcher's echo of a change a hook just
             reported. A read has no echo -- nothing happened on disk -- so
             stamping it there would swallow the genuine write that follows.
+
+        What it does share with :meth:`_publish` is :meth:`_observe`: a read of
+        a watched path alarms, because an agent *reading* `.env` is the case a
+        supervision feature exists for.
         """
-        broadcast(self._clients, _encode(event))
+        broadcast(self._clients, self._observe(event))
 
     def _publish(self, event: Event) -> None:
         self._remember_path(event)
-        message = _encode(event)
+        message = self._observe(event)
         self._recent.append(message)
         broadcast(self._clients, message)
+
+    def _observe(self, event: Event) -> str:
+        """Judge one event against the rules in force, and encode it.
+
+        **One call site for one policy, and that is the whole point of the
+        method.** Both fan-out paths -- the write path and the read path -- come
+        through here, so a later "reads should not alarm" change cannot land in
+        one of them and not the other; the symptom of that would be a build
+        where a read alarms and the next where it does not, invisible to any
+        single test.
+
+        :meth:`seed_paths` deliberately does **not**, and the exemption is
+        structural rather than filtered: it builds its own message and never
+        touches either fan-out. On a home directory the seed is 12 524 events,
+        which at the measured 5.35 us per match is 67 ms of matching for a
+        snapshot in which nobody did anything -- and it is never paid. Routing
+        the seed through here for consistency would also alarm 12 524 times.
+
+        The key is written only when the answer is true, which is
+        ``parse_command``'s "a key appears only when the frame carried it in a
+        form this daemon understands" read from the other direction: it keeps
+        every existing pinned event-frame assertion byte-identical and makes the
+        wire cost of this feature zero for the events that do not alarm.
+        """
+        if not self._attention.rules:
+            return _encode(event)
+        return _encode(event, attention.matches(self._attention, event.path))
 
     def _expand(self, path: str, op_type: str) -> list[str]:
         """A directory deletion also deletes everything known beneath it."""
@@ -562,8 +650,18 @@ class EventHub:
         return payload if isinstance(payload, dict) else None
 
 
-def _encode(event: Event) -> str:
-    return json.dumps(asdict(event), separators=(",", ":"))
+def _encode(event: Event, alarmed: bool = False) -> str:
+    """One event as the browser receives it, with the verdict only when true.
+
+    Not a bare ``asdict`` over a dataclass field, and it must not become one:
+    ``asdict`` emits every field unconditionally, so an ``attention`` field on
+    :class:`Event` would put ``"attention":false`` on all 12 524 events of a
+    home directory's seed. The verdict is a key this function adds, or does not.
+    """
+    frame = asdict(event)
+    if alarmed:
+        frame["attention"] = True
+    return json.dumps(frame, separators=(",", ":"))
 
 
 #: The only kinds a client may send. Anything else is a browser from another
@@ -728,14 +826,17 @@ class Session:
         home: str,
         token: str | None = None,
         allow_remote: bool = False,
+        attention_rules: str = "",
     ) -> None:
         self.home = home
         self.token = mint_token() if token is None else token
         self.allow_remote = allow_remote
+        self.attention_rules = attention_rules
         self.root = os.path.normpath(os.path.abspath(project_root))
         self.hub = EventHub(project_root=self.root)
         self._watcher = None
         self._status_busy = False
+        self.load_attention()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -749,6 +850,50 @@ class Session:
         if watcher is not None:
             with contextlib.suppress(Exception):
                 watcher.stop()
+
+    def load_attention(self) -> None:
+        """Read the rule file this root is governed by, and arm the hub with it.
+
+        The resolution lives here rather than in ``Settings`` because it needs
+        the root, and the root is the one thing a `ctrl+L` can change: the
+        setting is carried as a string, verbatim, and joined to the root only at
+        the moment somebody asks. So the **default** moves with the root and an
+        explicit ``--attention-rules`` does not.
+
+        **The one surprise, stated rather than fixed.** An explicit
+        ``--attention-rules /etc/rhizome/attention`` keeps naming the same file
+        across a switch, but its patterns are still interpreted relative to the
+        *new* root -- a silent re-anchoring that a pattern language whose meaning
+        depends on a switchable root cannot avoid. Refusing the switch while
+        explicit rules are loaded would trade a surprise for a refusal nobody
+        would understand; what makes the re-anchoring visible instead is the
+        frame naming the rule file it loaded.
+
+        **No thread, deliberately.** This is one capped read of at most 256 KiB
+        plus about 130 us of compilation, against a ``scan_tree`` that runs to
+        623 ms on a home directory and is already threaded for exactly that
+        reason. A thread here would be cargo, and saying so is cheaper than the
+        next reader wondering why it is missing.
+
+        **A load that read nothing arms nothing and announces nothing.** The hub
+        already matches against no rules, so the verdict is unaffected; what is
+        withheld is the header, and the reason is `statusList.ts`'s: a panel's
+        visibility derives from what it has to say, never from a flag, or every
+        project that has never heard of this feature carries a permanent empty
+        strip reporting nothing. Nothing is lost from the report this feature
+        exists for. A rule file that was read and asked for nothing still names
+        itself -- that is the case R7 is about, and it is the one a typo in
+        ``RHIZOME_ATTENTION`` produces -- and an explicit path that cannot be
+        read never reaches here at all, because ``rhi`` refuses it before a port
+        is bound.
+        """
+        path = self.attention_rules or os.path.join(
+            self.root, attention.DEFAULT_RULE_FILE
+        )
+        rules = attention.load_rules(path)
+        if rules == attention.EMPTY:
+            return
+        self.hub.set_attention(rules)
 
     def publish_meta(self) -> None:
         """Caption the HUD with the *current* root and its branch."""
@@ -801,8 +946,8 @@ class Session:
 
         The rest is ordered: stop the old observer (an abandoned project must not
         keep pushing events into a graph that no longer draws it), reset the hub
-        (clear, and tell the browsers to clear), re-caption, re-seed, and only
-        then watch the new root.
+        (clear, and tell the browsers to clear), re-caption, re-read the
+        attention rules, re-seed, and only then watch the new root.
 
         The seed scan runs on a thread. Pointed at a home directory that walk
         takes seconds, and on the loop it would freeze every connected client for
@@ -816,6 +961,9 @@ class Session:
         self.root = resolved
         self.hub.reset(resolved)
         self.publish_meta()
+        # Before the re-seed, so the first event after a switch is matched
+        # against the new project's rules rather than the previous project's.
+        self.load_attention()
 
         seeded = await asyncio.to_thread(scan_tree, resolved)
         self.hub.seed_paths(seeded)
@@ -1253,6 +1401,7 @@ async def run(settings: Settings, ready: Callable[[Readiness], None] | None = No
         home=os.path.expanduser("~"),
         token=settings.token,
         allow_remote=settings.allow_remote_control,
+        attention_rules=settings.attention_rules,
     )
     hub = session.hub
 

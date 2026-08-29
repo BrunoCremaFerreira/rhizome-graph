@@ -131,6 +131,7 @@ rhizome_graph/file_view.py  # what a clicked file shows: diff, else text, else h
 rhizome_graph/content_search.py # which files hold this string (forks nothing, imports no `re`)
 rhizome_graph/sizes.py      # how big is every file the graph draws (opens nothing, forks nothing)
 rhizome_graph/agentstate.py # pure: what a NON-tool-call payload says about its agent
+rhizome_graph/attention.py  # pure-ish: the paths the user asked to be told about (one file, read once)
 rhizome_graph/cli.py        # pure: argv + environ + cwd → frozen Settings; `rhi` itself
 rhizome_graph/assets.py     # pure: where THIS installation keeps web/dist, and the hook command
 rhizome_graph/ipc.py        # is that socket live? is that port free? (answers, never raises)
@@ -166,13 +167,18 @@ web/src/highlight.ts        # the ONE place that names shiki (lazy wasm + 22 lit
 web/src/readMarker.ts       # the violet ring a file wears while an agent is reading it
 web/src/agentState.ts       # pure: who is waiting, who has left (both selectors take `now`)
 web/src/waitMarker.ts       # the BROKEN ring an agent wears while it is blocked on a human
+web/src/attentionState.ts   # pure: the alarm latch -- a SET of what needs looking at, not a stream
+web/src/attentionList.ts    # pure: the alarm panel (order, cap, and what its header has to say)
+web/src/alarmMarker.ts      # the BRACKET a watched file wears once an agent has touched it
+web/src/nodeFade.ts         # pure: the idle fade, and who is exempt from it
 web/src/beams.ts            # pure: the two beam lifetimes, so a test can compare against them
 web/src/statusList.ts       # pure: the uncommitted-changes panel (order, cap, is it visible)
 web/src/searchKeys.ts       # pure: what ctrl+F / F3 / Esc mean (and what a SHIFTED ctrl+F is not)
 web/src/branding.ts         # pure: APP_NAME, so the untestable renderer never spells it
 web/src/token.ts            # pure: read the control token, stamp it on a command frame
 web/src/*Hud.ts             # thin DOM painters: context caption, event list, attribution, search
-                            # box, content-search box, git status panel, size legend
+                            # box, content-search box, git status panel, size legend,
+                            # attention panel
 setup.py / MANIFEST.in      # the ONLY dynamic build step: copy web/dist in, IF it was built
 run.sh / start.sh           # minimal launcher / full bootstrap
 ```
@@ -323,7 +329,7 @@ authored file here.
 
 Web MVP implemented and verified end-to-end (TDD).
 
-- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1575 pytest green with 20 skipped (1595
+- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1641 pytest green with 20 skipped (1661
   with `RHIZOME_PACKAGE_TESTS=1`, which opts into the slow builds — one wheel, one real `.deb`).
   Hook is stdlib-only and exits 0 on garbage input. Daemon seeds the project tree at boot,
   ingests hook events on a Unix socket, watches the filesystem, and serves `web/dist` over
@@ -734,7 +740,7 @@ Web MVP implemented and verified end-to-end (TDD).
     at all keeps its `.claude/` hidden, since the presence of the file is the switch — the
     answer to give first is the empty file, not a trigger on `.git`, which on this repository
     alone would draw 1 114 files of vendored Python.
-- **Frontend** (`web/`): 1474/1474 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
+- **Frontend** (`web/`): 1649/1649 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
   3.23.0 — 4.x needs Node ≥ 20 and this machine has 18) is the first runtime dependency added
   since `d3-force`; note that `npm install` under npm 10 strips the `libc` fields from
   `package-lock.json`, so check `git diff` on the lock after touching dependencies. Gource-style WebGL
@@ -1109,6 +1115,133 @@ Web MVP implemented and verified end-to-end (TDD).
     payload and classifies nothing, which is the whole reason a new matcher costs no hot-path
     logic, only one more ~40 ms process per firing, and these three fire at a rate bounded by
     *human* actions rather than by tool calls.
+- **The graph says when an agent touches something it should not.** The user declares path
+  patterns in a file — `.github/workflows/`, `package.json`, `.claude/settings.json`, lockfiles,
+  or `*` / `!src/` / `!src/**` for "anything outside `src/`" — and an event landing on a match
+  wears a bracket on the graph and opens a row in a top-left panel. It is a **supervision
+  signal, not a security control**: `PostToolUse` fires *after* the tool ran, so the file is
+  already written, and nothing in the UI may read as prevention. The staged plan is
+  `docs/features/done/2026-08-26-20-56-attention-rules.md`. Eleven things are load-bearing:
+  - **`gitignore.py`'s PURE layer is reused; `IgnoreRules` is refused.** `compile_rule` and
+    `match_rules` buy git's syntax, which every user of this tool already knows — `!` negation is
+    the only reason "anything outside `src/`" is three lines rather than a new pattern language,
+    and `dir_only` is what makes `.github/workflows/` reach the files under it with nothing
+    added. `IgnoreRules` is the other half and every part of it is about a rule file living
+    *inside* the tree it governs: per-directory `governs`, the memoized load, `invalidate`, and
+    the two measured traps of watching an ignore file. Attention rules are **one file, at the
+    root, read once**, so adopting it would import a governance model with nothing to govern.
+  - **The direction of failure INVERTS on reuse, and that is the whole reason `refused` exists.**
+    In `gitignore.py` a refused pattern, an unreadable file or a cap reached shows **more** files
+    and is safe by construction. Here the same refusal alarms **less**: the user wrote a rule
+    about `*.pem`, `compile_rule` could not translate it correctly, and the graph then reports
+    the silence that means "nothing has happened". A supervision feature whose failure mode is
+    indistinguishable from success is not a supervision feature. So `attention.py` compiles line
+    by line and **keeps the refusals verbatim** rather than calling `parse_patterns`, which drops
+    them silently.
+  - **`matches` asks the matcher TWICE and only an agreement counts.** `match_rules` takes an
+    `is_dir` flag and an event carries no such fact. Under `*` / `!src/` / `!src/**` the entry
+    `src` answers `True` as a file — `!src/` is `dir_only`, so the negation applies to the
+    directory while `*` matched it first — and `False` as a directory. And `_expand` turns a
+    directory deletion into its children *followed by the directory's own path*, so `rm -rf src/`
+    really does put `src` through the matcher: the one directory the user wrote two lines to
+    exclude would alarm. Short-circuiting, so a path matching nothing — almost every path — still
+    pays for exactly one pass. Asking twice is a rule of the **caller**, the same split that keeps
+    `.git` and `node_modules` in `tree.py` rather than in the matcher.
+  - **The seed exemption is STRUCTURAL, not a filter, and it is what makes this feature cheap.**
+    There are three fan-out sites and `seed_paths` builds its own message, never touching
+    `_publish` or `_broadcast_transient`. `_observe` sits on those two and on nothing else, so
+    "the boot snapshot never alarms" is a consequence of the existing shape rather than a
+    condition anyone has to remember. On a home directory that is 12 524 events at ~5.35 us each
+    — 67 ms of matching for a snapshot in which nobody did anything — never paid. The obvious
+    "consistency" refactor is to route the seed through `_observe` too; a test guards it.
+  - **One call site for one policy.** `_publish` and `_broadcast_transient` both come through
+    `_observe`, asserted over the parsed source (scoped to the `EventHub` class body, because
+    `completion_response` already has a local named `matches`). Two call sites is how a later
+    "reads should not alarm" change lands in one of them and not the other — a build where a read
+    alarms and the next where it does not, invisible to any single test.
+  - **The wire key is CONDITIONAL and `_encode` had to stop being a bare `asdict`.**
+    `"attention": true` is present only when the answer is true. `asdict` emits every field
+    unconditionally, so an `attention: bool = False` field on `Event` would put
+    `"attention":false` on all 12 524 seed events; the verdict is therefore a key `_encode` adds
+    or does not, and `Event` gained no field at all. `parseEvent` reads an absent key as `false`
+    by the `label` rule, and a non-boolean truthy value — `"yes"`, `1` — degrades to `false` too:
+    the fail-safe direction here is **silence**, because a page that alarms on a malformed frame
+    from a daemon of another version alarms on nothing the user wrote.
+  - **Reads alarm, and only the latch makes that survivable.** An agent *reading* `.env` is the
+    case this feature exists for. But reads arrive roughly ten times more often than writes, so
+    the alarm list is a **SET, not a stream**: forty touches of one path are one alarm with
+    `count: 40` whether or not something else alarmed in between. That is a deliberate divergence
+    from `eventLog.ts`, which folds into the **top** entry only because folding into an older one
+    would reorder the list under the reader's eye — here the reader is being asked "what needs
+    looking at", not "what happened last". The entry keeps its **first** timestamp for ordering
+    and its last for the count line. State it in the docstring or the next reader "fixes" it back.
+  - **Acknowledgement clears; a new event does not.** An alarm has no natural end — the file
+    stays modified — so it is dismissed by clicking the row, or by clear-all. It does **not**
+    clear on a new event for the same path, and acknowledging does not suppress: a later event
+    opens a **fresh** alarm at `count: 1`, because an alarm that keeps re-arming must not look
+    like one that was handled. It clears on `reset`, in `main.ts`'s single `onReset`, because the
+    paths belong to a project the user has left. The dismissal gets **no key**: Escape is
+    contested three ways in the chain already and this panel does not cover the graph.
+  - **The marker is a BRACKET, and the alarm is exempt from the idle fade.** The colour channel
+    is spoken for four times over and the last of them is the write flash, which fires at exactly
+    the moment an alarm is raised — an alarm painted as a base colour is repainted amber by its
+    own cause. So it is a third *shape*, and deliberately **not** a third ring: the graph already
+    carries the read ring and the search's active ring, and a third would inherit the read
+    marker's sparse-sampling risk plus a discrimination problem on top of it. The one renderer
+    expression that changed is the idle fade, and it moved out of `renderer.ts` into the pure
+    `nodeFade.ts` rather than being asserted over untestable source — this project's own move,
+    "when asked to specify something that lives in the renderer, specify the pure module it
+    should be extracted into". An alarm that fades out over the next minute is an alarm nobody
+    sees.
+  - **The panel is visible when it has SOMETHING TO SAY, which is not the same as having a row.**
+    `statusList.ts`'s rule is that visibility derives from the entry count and never from a flag,
+    and copying it literally shipped finding 5 anyway: the header — the rule source, the in-force
+    count, the refused patterns — was on screen only once something *unrelated* had alarmed, so a
+    user whose `*.pem` rule was dropped saw nothing, and the nothing was indistinguishable from a
+    clean session. So `visible` is true for a row **or** a non-zero refusal count **or**
+    `truncated`. A truncated rule file counts for a sharper version of the same reason: there is
+    no malformed pattern for the user to spot in their own file, so they cannot tell which of
+    their patterns fell off the end of the cap. A quiet session over clean rules is still an
+    absent panel, and `rules === null` — nothing heard from the daemon yet — is still absent,
+    because claiming "no rule file was found" before anyone read a disk is a statement about a
+    disk nobody read.
+  - **NO new command kind, and no rule ever arrives over the socket.** The temptation is a
+    `setAttention` so the page can edit the rules; it is refused for the reason
+    `content_search.py` "imports no `re`" is asserted over its parsed source. A pattern from the
+    network is compiled by `compile_rule` into a `re.Pattern` — a regex built from a string a
+    browser sent, bounded only by caps written against a file the user owns. `sizes` is the one
+    command in this protocol that turns no string from the network into anything; this feature
+    adds a second surface with that property by **adding no surface at all**, which is a stronger
+    position than adding one carefully. The price is stated rather than hidden: changing a rule
+    needs an editor and a `ctrl+L`, and there is no in-page rule editor.
+  - **Configuration: `--attention-rules PATH` / `RHIZOME_ATTENTION`, verbatim, and the refusal
+    rule applies.** The value stays a **string** and is never expanded or resolved in `cli.py` —
+    `web_dist`'s rule, since deciding which candidate exists is a filesystem question and that
+    value is built without a filesystem. `Session` joins it to the root at the moment somebody
+    asks, so the **default** (`<root>/.rhizome-attention`) moves with a `ctrl+L` and an explicit
+    path does not. An explicit path that is not a readable file **refuses at boot** — rc 1, one
+    line, before a port is bound — because someone who typed a path and got silence cannot tell
+    it from "nothing has alarmed yet", which is the worst reading this feature can produce. An
+    absent **default** is the normal case and degrades to no rules. One surprise is stated rather
+    than fixed: an explicit rule file keeps naming the same file across a switch but its patterns
+    are re-anchored to the *new* root, which a pattern language whose meaning depends on a
+    switchable root cannot avoid; the panel naming the file it loaded is what makes it visible.
+  - **A load that read nothing arms nothing and announces nothing.** The hub already matches
+    against no rules, so only the *header* is withheld — and an unconditional frame put
+    `{"kind":"attention","source":""}` into the replay of every session, breaking five baseline
+    assertions that pin a fresh client's kinds exactly. Nothing the report exists for is lost: a
+    rule file that was read and asked for nothing still names itself, which is the case a typo in
+    `RHIZOME_ATTENTION` produces, and an explicit path that cannot be read never reaches the
+    session at all. The load needs **no `asyncio.to_thread`**, deliberately: one capped read of
+    at most 256 KiB plus ~130 us of compilation, against a `scan_tree` that runs to 623 ms and is
+    already threaded. Saying so is cheaper than the next reader wondering why the thread is
+    missing.
+  - **The caps, and why one of them is this feature's own.** `MAX_BYTES` **is**
+    `gitignore.MAX_IGNORE_BYTES`, imported by identity rather than respelled — the
+    `content_search.MAX_FILE_BYTES IS file_view.DEFAULT_MAX_BYTES` precedent. But
+    `MAX_RULES_PER_FILE` is 1000, and 1000 rules is ~320 us per event by linear extrapolation,
+    ten times today's whole per-event path. So `MAX_ATTENTION_RULES` is **64**: a rule file with
+    more than 64 patterns is not a supervision policy, it is a second `.gitignore`.
 - **Text is not part of the glow.** Labels live in a separate `overlayScene`, drawn after
   the composer with `autoClear = false`. Every glyph pixel clears the bloom's 0.05
   threshold, so a label left in the main scene gets an additive halo that closes the
@@ -1217,7 +1350,10 @@ Web MVP implemented and verified end-to-end (TDD).
 Run, installed: `rhi /path/to/observed` — opens a window, serves the same page at
 `http://localhost:8080`, and ends everything when the window closes. `rhi --no-window` for a
 headless host, `--doctor` to check the hooks without starting anything, `--install-hooks` to
-write them. Run, from a checkout: `RHIZOME_PROJECT_ROOT=/path/to/observed ./start.sh`. Point
+write them, `--attention-rules PATH` (or `RHIZOME_ATTENTION`) to name the file declaring which
+paths deserve a second look — by default `<observed root>/.rhizome-attention`, in git's own
+pattern syntax, absent by default and refused loudly when an explicit path names no readable
+file. Run, from a checkout: `RHIZOME_PROJECT_ROOT=/path/to/observed ./start.sh`. Point
 the root at the project you want to *watch*, not at `rhizome-graph` — or start anywhere and
 switch with `ctrl+L` in the page (the switch is global: one daemon watches one root, so every
 viewer follows). Install attribution with `rhi --install-hooks`, which never writes without
@@ -1349,6 +1485,56 @@ the actor map is still unbounded for an agent that never reports a `Stop` (a kil
 crashed session), R7 having fixed only the common case; and R13, that nothing counts the blocked
 agents in *text* for a user whose camera is framed elsewhere — `#bottom-bar` is closed to it,
 because that row is one grid whose two side reserves were measured in a browser.
+
+**Not yet verified, for the attention rules.** Both suites are green and every decision in the
+feature is pure and pinned, but this host is a tty and **nothing here has been seen on a screen**
+— which matters more than usual, because the feature's whole product is a judgement about whether
+a signal reads as a signal. Whether the bracket says "look at this" rather than "this is
+selected", "this is damaged" or "this is decoration; whether it survives at four device pixels
+the sparse-sampling artefact `CLAUDE.md` already flags for the read ring, since a bracket is
+corners and gaps and that is the same artefact from the same direction; whether the red it
+borrows from the `D` flash is distinguishable from a delete happening right now, or whether the
+shape carries that alone; and whether a bracket, a read ring and the search's active ring on
+three neighbouring dots are three things or one mess. Whether the top-left panel collides with
+`#log` at a short viewport, the bargain `#size-legend` already accepts. Whether the header fits
+the panel's width once it carries a rule path, a count and a quoted refused pattern — the file
+viewer's header solved the same problem by **removing** something, and that trade has not been
+made here yet. And, sharpest: **the panel appearing on its own, holding a header, `0 alarms` and
+an empty list, because a pattern was refused** — the state the R7 visibility fix deliberately
+creates. Whether that reads as "your rule was dropped" or as an empty box that appeared for no
+reason is exactly the bet that fix makes, and it is the one thing the suite cannot answer.
+
+Nor is any of it measured against a real session. The per-event figures — 5.35 us at 11 rules,
+64.1 us at 200, ~17 us at the 64-rule cap — are the plan's, taken with `time.perf_counter` on a
+warm single-threaded interpreter and compared against a 30.29 us baseline measured by somebody
+else on another day; the 64-rule number is a **linear extrapolation**, not an observation, and
+the burst that would make it matter is roughly 3 000 events per second, which nothing here has
+ever produced. No hostile rule file has been fed through this path either: `gitignore.py`'s own
+suite covers the patterns one at a time, and what is unmeasured is 64 of the worst of them at
+once on the per-event path. `MAX_ALARMS` (100) and the marker tuning in `renderer.ts` —
+`MAX_ALARM_MARKERS = 12`, `ALARM_MARKER_PIXELS = 44`, the constant opacity, the z between the
+read ring and the search ring — are pinned guesses; the tests pin only **relations**, never
+values, so retuning is free once somebody has looked.
+
+Four findings from that plan are **noted and not built**, each with its trigger written down in
+`docs/features/done/2026-08-26-20-56-attention-rules.md`: R8, the browser **notification** — a
+secondary opt-in, ranked `next` because the graph marker and the panel are the product and a
+notification adds a real availability matrix (`http://localhost` and an SSH-forwarded
+`localhost:9000` are secure contexts, the `http://192.168.x.x` origin `start.sh` serves by
+default is **not**, and `window.Notification` may be absent there entirely), a permission prompt
+and a rate limit — with the audit's H4 attached to it, that a notification renders in OS chrome
+and survives in the notification centre, so anything that can put an event on the wire would be
+writing on the user's desktop unless the text is a fixed template with only the path substituted;
+trigger: the first time someone says they missed an alarm because they were in another window.
+R9, that the rule file is read once and never again, so editing it needs a `ctrl+L` or a restart
+— a watcher on one file walks straight into the two measured `.gitignore` traps (the daemon's own
+read is itself watched, and an atomic save carries the name only on the move's destination) and a
+poll is a fourth task on a file that changes once a month. R11, that rules cannot be edited from
+the page and are **one policy per daemon**, so two people watching one daemon share one policy —
+kept that way deliberately, and the shape that would avoid the whole question is the page sending
+**no pattern**, only a path already on the graph, which `resolve_inside` already contains. And
+the pre-existing R12/rootError case: a refused command is painted in the observed-root bar, which
+this feature adds no sixth instance of, because it adds no command.
 
 Not yet built: per-repository grouping in the panel (R5 in
 `docs/features/done/2026-08-17-16-21-multi-repo-git-status.md` — the `repo` field exists on

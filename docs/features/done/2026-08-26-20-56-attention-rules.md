@@ -1,9 +1,11 @@
 # Plan: Attention rules -- tell me when an agent touches something it should not
 
-- **Status:** todo
+- **Status:** done
 - **Created:** 2026-08-26 20:56
-- **Implemented:** -- (date, and the branch it landed on)
-- **PR/commit:** --
+- **Implemented:** 2026-08-29, on `development`. R1-R7 and R10 (the whole `now` rank, with R10
+  promoted from `next` per the tester's dependency finding on step 6.3). R8, R9 and R11 are
+  **not** built and stay ranked `next` / `noted`; their triggers are in this document.
+- **PR/commit:** -- (uncommitted in the working tree; `CLAUDE.md` rule 3)
 - **Consultations (mandatory):**
   - `software-architect` (2026-08-26) -- this document is its assessment and staged plan, and
     it names the owner of every RED/GREEN step below.
@@ -1174,3 +1176,83 @@ and `Notification` has zero hits), but state the technique and its weakness per 
 
 ---
 
+
+---
+
+## Implementation note (2026-08-29)
+
+Appended by the orchestrator on landing. `done/` is a historical archive and the code is the
+source of truth; this section records where what was built diverges from what was planned above,
+so a reader meets the divergence rather than discovering it.
+
+**Baselines, measured on this host on the day.** Backend **1575 passed / 20 skipped** before,
+**1641 / 20** after. Frontend **1474** before, **1649** after; `tsc --noEmit` and `vite build`
+clean. Section 0's frontend figure of 1403 and `CLAUDE.md`'s 1287 were both stale, and
+`CLAUDE.md`'s Status section has been corrected as the tester's review asked the first plan
+touching it to do. Section 0's "the backend suite could not be run on this host" no longer holds:
+`.venv/bin/pytest` exists now, so every backend row was verified by a real run rather than by a
+static count.
+
+**The corrections from the `developer-tester` consultation were applied in full, and three of
+them changed the design rather than the wording.**
+
+1. **1.4 — the wart lives at `is_dir=False`, which is the mode this feature chose.** Refusing the
+   parameter does not make it unreachable; it makes it the only mode, and `_expand` publishes a
+   deleted directory's own path, so `rm -rf src/` really did reach it. `matches` therefore asks
+   `match_rules` **twice** and counts only an agreement — `False` for `src` and for `debian`,
+   `True` for `debian/control`. Short-circuiting, so a non-matching path still pays one pass.
+   Measured against the real matcher before it was written down.
+2. **3.5 — the jaw the row asked for guards nothing, because there are no pinned event-frame
+   equality assertions.** Replaced by the sharper one the consultation specified: `"attention" not
+   in json.loads(message)` over a non-matching hook event, a watcher event and a seed event. It is
+   what forces `_encode` to stop being a bare `asdict`, and `Event` gained no field at all.
+3. **6.6 — deleted, and the decision moved out of the renderer** into the pure `nodeFade.ts` with
+   `web/tests/nodeFade.test.ts` behind it. The plan called it "the weakest test in the plan"; the
+   consultation was right that it is not expressible as a text scan at all. 6.4 likewise became a
+   behavioural `web/tests/alarmMarker.test.ts` on `readMarker.test.ts`'s recording-context
+   technique, which pins more than the scan would have.
+
+**R10 was promoted from `next` to `now` and landed before R6**, per the consultation's dependency
+finding: a `now` step cannot depend on a `next` one, and `actorColor` is two lines shared with two
+other plans. `"actor:"` no longer appears in `renderer.ts`.
+
+**The §2.1 decision was adopted:** frontend source-level contracts are text scans in pytest,
+through the new shared `tests/frontend_source.py`, and every test using it carries a header saying
+it pins a spelling and naming the behavioural test that pins the behaviour. R6.5 is the only such
+scan this feature added, and it was verified red before `main.ts` was touched.
+
+**Two things were built that this plan did not specify, and both are corrections to it.**
+
+- **The panel is visible when it has something to say, not when it has a row.** R6.1 pinned
+  `statusList.ts`'s rule literally — `visible` derives from the entry count — and copying it
+  shipped finding 5 anyway: the header, which is the entire R7 report, was on screen only once
+  something *unrelated* had alarmed, so a refused `*.pem` reported nothing and the nothing was
+  indistinguishable from a clean session. `visible` is now true for a row **or** a non-zero
+  refusal count **or** `truncated`. A truncated file counts for a sharper version of the reason a
+  refusal does: there is no malformed pattern for the user to spot in their own file, so they
+  cannot tell which of their patterns fell off the cap. A quiet session over clean rules is still
+  an absent panel, and `rules === null` is still absent, because claiming "no rule file was found"
+  before anyone read a disk is a statement about a disk nobody read.
+- **A `Session` that found no rule file publishes no header.** R7's target shape asks for the
+  header always; an unconditional frame put `{"kind":"attention","source":""}` into the replay of
+  every session and broke five baseline assertions pinning a fresh client's kinds exactly. Only
+  the header is withheld — the hub already matches against no rules — and nothing the report
+  exists for is lost: a rule file that was read and asked for nothing still names itself, which is
+  the `RHIZOME_ATTENTION`-typo case R7 names as mattering most, and an explicit path that cannot
+  be read never reaches the session because `rhi` refuses it before a port is bound. `source: ""`
+  therefore reaches the page only from `EventHub.set_attention(EMPTY)` directly, which
+  `tests/test_hub_attention.py` still pins.
+
+**Smaller notes.** 3.6's source contract is scoped to the `EventHub` class body rather than the
+whole file, because `completion_response` already has a local named `matches` and a file-wide scan
+would be satisfied today by the wrong function. `load_rules` reaches for
+`gitignore._strip_trailing_whitespace`, a private name across a module boundary, deliberately:
+git's escape rule for trailing whitespace is part of the syntax being reused and respelling it
+here would be a second, subtly wrong definition. The boot refusal is `os.path.isfile` plus
+`os.access`, so a mode-`0o000` rule file is caught at boot rather than leaving a graph that never
+alarms. `truncated` is set by the **rule** cap as well as the byte cap. And `attention: false` was
+added to the four existing `AgentEvent` test factories, before their `...overrides` spread exactly
+as `label: ""` already sits there — additive, no assertion moved.
+
+**R8, R9 and R11 were not built,** and their triggers stand as written above. The audit's H4
+belongs to R8 and travels with it.
