@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+import rhizome_graph.normalize as normalize
 from rhizome_graph.normalize import Event, normalize_event
 
 # Colors fixed by the shared contract (hex, no leading '#').
@@ -277,3 +278,94 @@ def test_returns_event_dataclass_instance_for_valid_input():
     event = normalize_event(hook, known_paths=set(), project_root=ROOT)
 
     assert isinstance(event, Event)
+
+
+# --- 10. retype: one event, restated as another operation ------------------
+#
+# `daemon/server.py` needs this because deferring the watcher's publish means a
+# hook can arrive to supersede a change the watcher had already classified. An
+# `Edit` payload normalizes to `M` whatever `known_paths` says, so the hook that
+# supersedes a held `A` would announce a modification of a node the browser has
+# never been given -- the creation lost, and the agent recorded as having
+# modified a file it created.
+#
+# It lives here, and not inline in the daemon, because `_COLOR_BY_TYPE` lives
+# here: a `dataclasses.replace(event, type="A")` written in the hub restates the
+# type and forgets the colour, and the frame goes out as a green `A` painted the
+# amber of an `M`. Type and colour are one fact spelled twice, so they move
+# together or not at all.
+
+
+def test_retype_carries_the_colour_of_the_new_operation():
+    original = Event(
+        ts=1234.5,
+        agent=SESSION,
+        type="M",
+        path="docs/fresh.md",
+        color=COLOR_M,
+        origin="hook",
+        label="developer-backend",
+    )
+
+    restated = normalize.retype(original, "A")
+
+    assert (restated.type, restated.color) == ("A", COLOR_A)
+
+
+def test_retype_changes_nothing_else_about_the_event():
+    # Everything the hook knew and the watcher did not -- who, when, what path,
+    # which source -- is exactly what the supersede exists to keep.
+    original = Event(
+        ts=1234.5,
+        agent=SESSION,
+        type="M",
+        path="docs/fresh.md",
+        color=COLOR_M,
+        origin="hook",
+        label="developer-backend",
+    )
+
+    restated = normalize.retype(original, "A")
+
+    assert (
+        restated.ts,
+        restated.agent,
+        restated.path,
+        restated.origin,
+        restated.label,
+    ) == (1234.5, SESSION, "docs/fresh.md", "hook", "developer-backend")
+
+
+def test_retype_returns_the_event_unchanged_for_an_operation_it_does_not_know():
+    # Same contract as every other function in this module: malformed input is
+    # answered, never raised on. A caller inventing a type has no colour to be
+    # given, and a frame carrying a type the browser's closed set does not
+    # contain is worse than one that was simply not restated.
+    original = Event(
+        ts=1234.5,
+        agent=SESSION,
+        type="M",
+        path="docs/fresh.md",
+        color=COLOR_M,
+    )
+
+    restated = normalize.retype(original, "W")
+
+    assert (restated.type, restated.color) == ("M", COLOR_M)
+
+
+def test_retype_leaves_the_event_it_was_given_alone():
+    # A `dataclasses.replace`, not a mutation: the daemon holds the hook's own
+    # event in a local while it decides, and a caller that mutated its argument
+    # would rewrite an object other code is still reading.
+    original = Event(
+        ts=1234.5,
+        agent=SESSION,
+        type="M",
+        path="docs/fresh.md",
+        color=COLOR_M,
+    )
+
+    normalize.retype(original, "A")
+
+    assert (original.type, original.color) == ("M", COLOR_M)

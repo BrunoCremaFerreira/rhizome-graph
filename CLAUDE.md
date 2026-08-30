@@ -115,7 +115,7 @@ it causes.
 ## Intended layout
 
 ```
-rhizome_graph/normalize.py  # pure: hook JSON → Event; also actor_of / seed_event / fs_event
+rhizome_graph/normalize.py  # pure: hook JSON → Event; also actor_of / seed_event / fs_event / retype
 rhizome_graph/tree.py       # boot snapshot of the observed project
 rhizome_graph/gitignore.py  # git's ignore syntax, pure; IgnoreRules reads the files, per directory
 rhizome_graph/repo.py       # pure: reads .git/HEAD for the branch (never shells out to git)
@@ -209,8 +209,12 @@ tail -f /tmp/claude-gource.pipe | gource --realtime --log-format custom \
   file tools and cannot resolve a glob or a compound command; the watcher gives
   *completeness* but no attribution. They are combined in `EventHub`: a filesystem change
   within `ATTRIBUTION_WINDOW_SECONDS` of a hook inherits that hook's agent, and a path a hook
-  just reported is suppressed on the watcher side so one write flashes once. Neither source
-  replaces the other.
+  just reported is suppressed on the watcher side so one write flashes once. **The suppression
+  runs both ways, and the second direction is the one that matters**: a change the watcher saw is
+  *held* for `FS_SETTLE_SECONDS` rather than drawn on sight, so the hook that owns it has time to
+  arrive and supersede it. `PostToolUse` fires *after* the tool wrote the file and the hook is a
+  ~40-56 ms process spawn, so the watcher almost always wins the race -- forward suppression alone
+  fires in the case that essentially never happens. Neither source replaces the other.
 - **When the parser would have to guess, it stays silent.** `_parse_bash` returns `None` for
   globs and directory destinations rather than inventing a path: a wrong node stays on screen
   forever, a missing one is filled in by the watcher milliseconds later.
@@ -332,7 +336,7 @@ authored file here.
 
 Web MVP implemented and verified end-to-end (TDD).
 
-- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1745 pytest green with 20 skipped (1765
+- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1772 pytest green with 20 skipped (1792
   with `RHIZOME_PACKAGE_TESTS=1`, which opts into the slow builds — one wheel, one real `.deb`).
   Hook is stdlib-only and exits 0 on garbage input. Daemon seeds the project tree at boot,
   ingests hook events on a Unix socket, watches the filesystem, and serves `web/dist` over
@@ -1368,9 +1372,13 @@ Web MVP implemented and verified end-to-end (TDD).
   `agent_type`; a read of a file outside the root produces no event at all; a `Write` after a
   `Read` of the same path is still an `A`; and no `R` survives in the replay handed to a
   client that connects afterwards, while the real write does. Also: tree seeded on connect; a Write flashes
-  once across both channels **when the hook wins the race, which the session-stats verification
-  found is not the usual case -- see "One edit, two events" below**; `cp *.md docs/` reports each file actually copied, credited to
-  the agent; `rm -rf docs/` prunes the subtree; a non-agent edit appears with no actor; the
+  once across both channels, whichever source wins the race (re-measured 2026-08-30, at a 0 ms,
+  a 40 ms and a 150 ms gap); `cp *.md docs/` reports each file actually copied, credited to
+  the agent -- and now for a better reason, since the actor is resolved when a held change
+  flushes rather than when it arrived, so the hook that stamps `_last_hook` 40 ms *after* the
+  copies hit disk is still in time; `rm -rf docs/` prunes the subtree, children first, every one
+  of them carrying the agent; a non-agent edit appears with no actor, one settle window (0.25 s)
+  after it happened; the
   meta frame arrives first and a branch switch is pushed without reconnecting; real captured
   hook payloads replayed through the daemon yield two distinct actors, the subagent's carrying
   its `agent_type` as a label. For the status panel, against a scratch repository holding one
@@ -1660,32 +1668,62 @@ kept that way deliberately, and the shape that would avoid the whole question is
 the pre-existing R12/rootError case: a refused command is painted in the observed-root bar, which
 this feature adds no sixth instance of, because it adds no command.
 
-**One edit, two events -- a pre-existing defect the session-stats panel makes permanent.** The
-dedupe between the two capture sources is **one-directional**: `ingest_fs_change` skips a path
-`_recently_hooked` says a hook just reported, but `ingest_line` stamps `_hook_paths` and
-publishes unconditionally, never consulting `_fs_paths`. So the suppression only works when the
-**hook arrives first** -- and it usually does not. `PostToolUse` fires *after* the tool ran, so
-the file is already on disk when the hook process starts, and that process is a ~40-56 ms spawn.
-Driven through the real `hooks/emit_event.py`, three edits by one agent produced **six** events
-and a table reading `writes: 5` for that agent plus a phantom `agent: ""` row carrying the
-first edit -- the watcher's `A`, credited to `_active_agent()` (the *previous* agent, or nobody
-at the start of a session), followed by the hook's `M`, which is an `M` because the watcher's
-publish already put the path in `known_paths`. At a 0 ms gap the hook wins and one event
-appears; at 40 ms and at 150 ms the watcher wins and two do.
+**One edit, two events -- fixed on 2026-08-30, and kept here as the record of the
+measurement.** The dedupe between the two capture sources used to be **one-directional**:
+`ingest_fs_change` skipped a path `_recently_hooked` said a hook had just reported, but
+`ingest_line` stamped `_hook_paths` and published unconditionally, never consulting `_fs_paths`.
+So the suppression only worked when the **hook arrived first** -- and it usually did not.
+`PostToolUse` fires *after* the tool ran, so the file is already on disk when the hook process
+starts, and that process is a ~40-56 ms spawn. Driven through the real `hooks/emit_event.py`,
+three edits by one agent produced **six** events and a table reading `writes: 5` for that agent
+plus a phantom `agent: ""` row carrying the first edit -- the watcher's `A`, credited to
+`_active_agent()` (the *previous* agent, or nobody at the start of a session), followed by the
+hook's `M`, which was an `M` because the watcher's publish had already put the path in
+`known_paths`.
 
-**This is not a regression, and the counters are faithful.** The same probe against an archive
-of `HEAD` -- none of this feature's code -- produces two events for a new file *and* for an
-existing one, so `_observe` is counting exactly what the hub fans out. What changed is the
-consequence: a transient double flash, which nobody could count, is now a quantified
-`writes: 5` for three edits that sits on screen. **The panel's `writes` is a count of events,
-not of edits**, and the first row of a session may be a phantom. The fix belongs upstream in
-the hook/watcher dedupe -- a RED test for `ingest_fs_change`, most likely a reverse suppression
-keyed on `_fs_paths` within the coalesce window, plus a rule for the `A`-then-`M` inversion --
-and the counters would need no change at all. It is recorded here rather than fixed because it
-is older than this feature, wider than it, and touches the attribution path that
-`CLAUDE.md` warns is the hard part.
+**What fixed it: the watcher no longer publishes on sight.** A change it sees is held for
+`FS_SETTLE_SECONDS` (0.25 s, `daemon/server.py`), and a hook event for the same path inside that
+window is not a second event -- it is the same change, better described, and it **supersedes** the
+pending one. A change nobody claims is published at the end of the window, attributed by
+`_active_agent()` read **at flush time**. Five things are load-bearing:
 
-**Not yet verified, for the session statistics panel.** Both suites are green -- backend 1745,
+  - **The `A`-then-`M` inversion is not fixed by a mechanism; it is fixed by the absence of the
+    pollution.** Under deferral the watcher never reaches `_known_paths` before the hook
+    normalizes, so `normalize_event` computes `A` for a genuine creation with no new rule at all.
+  - **The cancel sits AFTER the `R` branch returns in `ingest_line`, never before it.**
+    Read-then-Edit is the commonest thing an agent does; cancelling at the top would have a read
+    swallow a pending write -- a change that happened on disk, was never drawn, and has no watcher
+    correction coming, because the watcher is the source that was silenced.
+  - **A hook deletion cancels the pending subtree AND expands over it.** Cancelling the watcher's
+    held per-child `D`s is only safe because the hook's own `D` now carries them, through the same
+    `_expand`, children first, each credited to the hook's agent. Shipping the cancel without the
+    expansion left `gone/a.txt` and `gone/b.txt` in `_known_paths` and on every later client's
+    graph forever -- the unit suite was green and only the browser measurement found it.
+  - **`schedule=None` keeps the immediate publish**, which is what leaves ~40 existing call sites
+    untouched; `Session` passes a *lazy* `loop.call_later` so constructing one needs no loop.
+    `reset` cancels every pending handle, or a callback fires after a `ctrl+L` and publishes an
+    abandoned project's path into an emptied `_known_paths`, drawn as an add and clickable.
+  - **The values are not pinned, the relation is:** `FS_SETTLE_SECONDS < COALESCE_WINDOW_SECONDS
+    < DEDUPE_WINDOW_SECONDS`, the idiom `STALE_WAIT_SECONDS > LONGEST_HUMAN_ABSENCE_SECONDS`
+    already uses. `tests/test_fs_settle_integration.py` runs in the default suite deliberately: it
+    is the only test that can catch the window set too *short*, since every other assertion drives
+    a fake scheduler by hand and would pass at a window of one millisecond.
+
+**Verified in a browser, against a live daemon** (2026-08-30, headless Chromium): a disk-first
+edit is one event carrying its agent; a new file written disk-first is one event, typed `A`,
+carrying its agent; the watcher-alone and hook-first orderings are unchanged at one event each;
+three edits by one agent give `3 written` on a clean daemon with **no `unattributed` row**; an
+`rm -rf` over a held edit publishes the edit, then the subtree children-first, and the node set a
+fresh client draws for that subtree is empty; a read-then-write of a new path is still one `A`;
+and an unclaimed human edit arrives 0.281 s after it happened.
+
+**Stated and not fixed.** The window is a guess about a race: where the hook spawn exceeds 0.25 s
+the defect returns *silently*, with the old symptom. Watcher events nobody claims are still
+attributed by time, so two agents at once can still credit one to the other. And `writes` is still
+a count of events for Bash-driven changes -- a `cp` of 40 files is 40 writes, which is what the
+panel means.
+
+**Not yet verified, for the session statistics panel.** Both suites are green -- backend 1772,
 frontend 1768 -- and every pure decision is pinned, but this host is a tty and **nothing here
 has been on a screen**. Whether the top-right column reads as one corner or as two boxes
 stacked. Whether 20 agent rows in a 45vh box is a panel or a wall. Whether a row's three lines

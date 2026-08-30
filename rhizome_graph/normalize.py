@@ -19,7 +19,7 @@ from __future__ import annotations
 import os.path
 import shlex
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # Operation types and their fixed Gource colors (hex, no leading '#').
 _OP_ADDED = "A"
@@ -240,6 +240,32 @@ def fs_event(
         origin=ORIGIN_WATCH,
         label=label,
     )
+
+
+def retype(event: Event, op_type: str) -> Event:
+    """The same event, restated as another operation -- type and colour together.
+
+    The daemon needs this because it defers what the watcher reports: a hook
+    arriving inside the settle window supersedes a change the watcher had
+    already classified, and an ``Edit``/``MultiEdit`` payload normalizes to
+    ``M`` whatever ``known_paths`` says. Superseding a held ``A`` with it would
+    announce a modification of a node the browser has never been given -- the
+    creation lost, and the agent recorded as having modified a file it created.
+
+    It lives here and not in the hub because ``_COLOR_BY_TYPE`` lives here. A
+    bare ``replace(event, type="A")`` written in the daemon restates the type and
+    forgets the colour, and the frame goes out as a green ``A`` painted the amber
+    of an ``M``: one fact spelled twice, so it moves together or not at all.
+
+    An operation this module has no colour for returns the event unchanged, the
+    same contract every other function here keeps -- malformed input is answered,
+    never raised on, and a frame carrying a type outside the browser's closed set
+    is worse than one that was simply not restated. A copy, never a mutation: the
+    caller holds the hook's own event while it decides.
+    """
+    if op_type not in _COLOR_BY_TYPE:
+        return event
+    return replace(event, type=op_type, color=_COLOR_BY_TYPE[op_type])
 
 
 def _resolve_operation(

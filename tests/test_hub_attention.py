@@ -659,6 +659,15 @@ def test_an_event_after_a_switch_is_matched_against_the_new_projects_rules(
         await session.switch_root(str(new))
         session.hub.ingest_fs_change(WATCHED, "M")
         session.hub.ingest_fs_change("key.pem", "M")
+        # A session's hub defers what the watcher reports for
+        # `FS_SETTLE_SECONDS`, so a hook arriving a moment later supersedes it
+        # instead of adding a second event for one change (see
+        # `tests/test_hub_fs_settle.py`). Nothing about the rules changes; the
+        # two frames simply are not on the wire yet when the scenario returns,
+        # so the loop is advanced past the window before anything is read.
+        # `getattr` on purpose: this test specifies the attention rules and not
+        # the settle window, so it must stay green on both sides of that GREEN.
+        await asyncio.sleep(getattr(server, "FS_SETTLE_SECONDS", 0.0) * 2 + 0.1)
 
     _run(scenario())
 

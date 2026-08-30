@@ -70,6 +70,7 @@ from websockets.asyncio.client import connect
 
 import daemon.server as server
 from daemon.server import EventHub, Session, start_server
+from fake_scheduler import FakeScheduler
 
 ROOT = "/proj"
 SESSION = "sess-abc"
@@ -335,6 +336,45 @@ def test_a_directory_deletion_counts_every_file_it_took_with_it():
     hub.ingest_fs_change("src", "D")
 
     assert _row(hub, "")["writes"] == 3
+
+
+# --- 2.6 the acceptance guard: the session that was measured ----------------
+
+
+def test_three_disk_first_edits_by_one_agent_are_three_writes_and_no_phantom():
+    """A JAW, not a RED: it passes once the settle window is in place.
+
+    There is no new counting behaviour here -- `_observe` already counts exactly
+    what the hub fans out, and it was faithful all along. What this pins is the
+    *input*: that one edit reaches it once.
+
+    The number this replaces was measured. `PostToolUse` fires after the tool
+    has run, so the file is already on disk when the hook process starts, and
+    that process is a 37-56 ms spawn: the watcher wins, publishes an event
+    credited to `_active_agent()` -- the *previous* agent, or nobody at the
+    start of a session -- and puts the path into `_known_paths`, so the hook's
+    own event follows as an `M`. Three edits produced six events, a row reading
+    `writes: 5` for the agent, and a phantom `agent: ""` row holding the first
+    one. One real session accumulated `unattributed / 15 written` that way,
+    every one of them the watcher half of some agent's own edit.
+
+    The single assertion carries both halves on purpose. `writes: 3` alone would
+    pass over a table that also held a phantom row, and "no empty-agent row"
+    alone would pass over a table crediting the agent with six.
+    """
+    schedule = FakeScheduler()
+    hub = EventHub(project_root=ROOT, schedule=schedule)
+
+    for index in range(3):
+        hub.ingest_fs_change(f"docs/note{index}.md", "M")
+        hub.ingest_line(
+            _write(f"docs/note{index}.md", agent_id=SUBAGENT_ID, agent_type=SUBAGENT_TYPE)
+        )
+    schedule.drain()
+
+    assert [(row["agent"], row["writes"]) for row in _table(hub)] == [
+        (SUBAGENT_ID, 3)
+    ]
 
 
 # --- 2.5 / 3.3 a root switch forgets the project it was counting ------------

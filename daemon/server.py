@@ -63,6 +63,7 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from pathlib import Path
+from typing import Protocol
 
 from websockets.asyncio.server import Server, ServerConnection, broadcast, serve
 from websockets.datastructures import Headers
@@ -95,6 +96,7 @@ from rhizome_graph.normalize import (
     fs_event,
     normalize_event,
     refreshes_actor,
+    retype,
     seed_event,
 )
 from rhizome_graph.paths import complete_dir, resolve_root
@@ -126,6 +128,27 @@ DEDUPE_WINDOW_SECONDS = 2.0
 #: How long after reporting a path a bare "modified" is treated as the tail of
 #: that same write. Writing a file emits created+modified milliseconds apart.
 COALESCE_WINDOW_SECONDS = 0.75
+
+#: How long a change the watcher saw is held before it is drawn, so the hook
+#: that owns it can arrive and supersede it instead of adding a second event for
+#: one change. `PostToolUse` fires *after* the tool ran, so the file is already
+#: on disk when the hook process starts, and that process is a measured 37-56 ms
+#: spawn plus a Unix-socket connect: the watcher almost always wins the race, and
+#: publishing on sight is what turns the hook's own event -- the only one that
+#: knows the author -- into a second event, on a path `_known_paths` has already
+#: swallowed. The race was probed at 0 / 40 / 150 ms gaps; 0.25 s is roughly four
+#: times the measured spawn, which is the headroom a loaded machine needs.
+#:
+#: The values are not pinned; the relation is --
+#: ``FS_SETTLE_SECONDS < COALESCE_WINDOW_SECONDS < DEDUPE_WINDOW_SECONDS``, the
+#: idiom `STALE_WAIT_SECONDS > LONGEST_HUMAN_ABSENCE_SECONDS` already uses, and
+#: what makes retuning free. At or above the coalesce window the created+modified
+#: pair of one write would straddle the flush and the tail would arrive as a
+#: second edit; at or above the dedupe window a change would flush after the
+#: hook's stamp had expired, which is this defect reintroduced at the far end.
+#: Deliberately not a `Settings` field: it is a correctness parameter tied to
+#: hook spawn latency, not a preference.
+FS_SETTLE_SECONDS = 0.25
 
 #: How often the observed repository is re-read for the HUD's branch. Polling is
 #: the only way to see a checkout: `.git` is named in ``tree.ALWAYS_IGNORED_DIRS``
@@ -165,6 +188,36 @@ class IngestSocketInUseError(RuntimeError):
     camera. Named so a launcher can catch exactly this and say "already
     running" rather than print a traceback.
     """
+
+
+#: A ``loop.call_later``, injected the way :class:`EventHub` already injects its
+#: clock. A signature rather than a class on purpose: the daemon passes a lambda
+#: and the tests pass a collector, and pinning a type here would specify the
+#: shape of the daemon's own lambda rather than what it has to do.
+Scheduler = Callable[[float, Callable[[], None]], "TimerLike"]
+
+
+class TimerLike(Protocol):
+    """The half of ``asyncio.TimerHandle`` the hub actually uses."""
+
+    def cancel(self) -> None:
+        """Keep the callback from running; idempotent, like the real one."""
+
+
+@dataclasses.dataclass
+class _PendingChange:
+    """A watcher change being held, and the handle that will release it.
+
+    The actor is deliberately **not** stored. Attribution is resolved when the
+    change flushes, not when it arrives: a glob-expanding ``cp *.md docs/``
+    reaches ``_parse_bash``, which stays silent rather than inventing a path, so
+    the hook publishes nothing -- but it does stamp the actor, ~40 ms *after* the
+    copies hit disk. Read at arrival those files are anonymous; read at flush
+    they are credited to the agent that ran the command.
+    """
+
+    op: str
+    handle: TimerLike
 
 
 class EventHub:
@@ -208,6 +261,12 @@ class EventHub:
         tree out of the replay.
       * ``_reset`` -- the last "the observed project changed, clear everything"
         frame, in a replaceable slot like ``_meta`` (see :meth:`reset`).
+      * ``_pending`` -- the changes the watcher has reported and the hub has not
+        drawn yet, keyed on path, each holding the operation and the handle that
+        will release it. A change is held for ``_settle_window`` so the hook that
+        owns it can supersede it rather than add a second event for one change
+        (see :meth:`ingest_fs_change`). Empty, and never filled, in a hub given
+        no scheduler.
       * ``_last_hook`` -- the actor that acted most recently, as
         ``(agent, label, timestamp)``, which is how a filesystem change gets
         attributed to whoever caused it (see :meth:`ingest_fs_change`). The
@@ -223,8 +282,23 @@ class EventHub:
         attribution_window: float = ATTRIBUTION_WINDOW_SECONDS,
         dedupe_window: float = DEDUPE_WINDOW_SECONDS,
         coalesce_window: float = COALESCE_WINDOW_SECONDS,
+        settle_window: float = FS_SETTLE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        schedule: Scheduler | None = None,
     ) -> None:
+        """Build a hub; ``schedule=None`` means it publishes on sight.
+
+        The scheduler is injected beside the clock and for the same reason: a
+        test drives the settle window by hand instead of sleeping through it, so
+        an assertion about *what was published* never becomes an assertion about
+        how fast the host is.
+
+        ``schedule=None`` keeping today's immediate publish is an honest default
+        rather than a silent fork -- a hub given no way to wake itself up cannot
+        defer, and swallowing changes until the next one arrived would be worse
+        than not deferring at all. :class:`Session` always passes one, which is
+        what stops the daemon ever being such a hub.
+        """
         self._project_root = project_root
         self._known_paths: set[str] = set()
         self._seed: list[str] = []
@@ -242,7 +316,10 @@ class EventHub:
         self._attribution_window = attribution_window
         self._dedupe_window = dedupe_window
         self._coalesce_window = coalesce_window
+        self._settle_window = settle_window
         self._clock = clock
+        self._schedule = schedule
+        self._pending: dict[str, _PendingChange] = {}
         self._last_hook: tuple[str, str, float] | None = None
         self._hook_paths: dict[str, float] = {}
         self._fs_paths: dict[str, float] = {}
@@ -472,6 +549,14 @@ class EventHub:
         numbers would be wrong as well as stale, and a default rule file belongs
         to a project nobody is watching any more.
 
+        ``_pending`` is the piece with the longest fuse. Everything else here is
+        wrong the moment it is read; a held change is wrong a quarter of a second
+        *later*, on a graph that has already been cleared and re-seeded -- a node
+        from the abandoned project, drawn green because the new one has never
+        heard of that path, offering a click `resolve_inside` then refuses. So
+        every handle is cancelled and the buffer emptied, rather than left to
+        fire into a project it knows nothing about.
+
         The frame is kept in a slot of its own so a client connecting *after* the
         switch is told to clear too. Unlike :meth:`set_meta` this does not dedupe
         on the value: resetting to the same root is a request for a clean slate,
@@ -491,6 +576,9 @@ class EventHub:
         self._last_hook = None
         self._hook_paths.clear()
         self._fs_paths.clear()
+        for held in self._pending.values():
+            held.handle.cancel()
+        self._pending.clear()
 
         message = json.dumps(
             {"kind": "reset", "root": project_root}, separators=(",", ":")
@@ -549,11 +637,66 @@ class EventHub:
             self._broadcast_transient(event)
             return
 
-        self._hook_paths[event.path] = self._clock()
-        self._publish(event)
+        # The hook owns this change: whatever the watcher is holding for the
+        # same path is the same change, worse described, so it is cancelled
+        # rather than published beside this one. A deletion takes the subtree
+        # with it -- a held `M` for `src/a.py` flushing after a hook `D` for
+        # `src` would put a file back on a graph it no longer belongs to,
+        # clickable and refused by `resolve_inside` when clicked.
+        #
+        # **After the `R` branch has returned, never before it.** Read-then-Edit
+        # is the single commonest thing an agent does; cancelling at the top of
+        # this method would have a read swallow the pending write, leaving a
+        # change that happened on disk, was never drawn, and has no watcher
+        # correction coming -- because the watcher is the source that was
+        # silenced.
+        held = self._cancel_pending(event.path, subtree=event.type == "D")
+
+        # The watcher saw the file appear; the hook did not, because an
+        # `Edit`/`MultiEdit` payload normalizes to `M` whatever `_known_paths`
+        # says and under deferral the watcher's `A` deliberately has not reached
+        # `_known_paths` yet. Announcing the `M` would hand the browser an amber
+        # modification of a node it has never been given. This is reconciliation
+        # and not a second add-vs-modify authority: `_known_paths` still decides,
+        # and the held `A` is the kernel's evidence of prior non-existence that
+        # the hook's normalization ran too early to see. Who, when and where all
+        # still come from the hook.
+        if held == "A" and event.type == "M":
+            event = retype(event, "A")
+
+        # A hook deletion of a directory deletes everything known beneath it as
+        # well, children first -- the same :meth:`_expand` the watcher's own
+        # deletions get, so there is one answer to "what does deleting `src`
+        # remove" rather than two. The cancel above and this expansion are two
+        # halves of one rule: cancelling the held per-child deletions is only
+        # safe because this `D` carries them itself. Skipping it left
+        # `gone/a.txt` in `_known_paths` after `rm -rf gone`, replayed to every
+        # client connecting afterwards and on the graph for the rest of the
+        # session -- a wrong node stays on screen forever, and this one had no
+        # watcher correction coming, because the watcher was the source the
+        # cancel silenced.
+        #
+        # Letting the children's held `D`s flush on their own instead would
+        # publish the parent a quarter of a second *before* them, an ordering
+        # the browser has never been given; `_expand` already guarantees
+        # `[*children, path]`. Each child is the hook's own event with another
+        # path, so who, when and where it came from all travel with it -- a
+        # child credited to nobody would reintroduce one level down exactly the
+        # unattributed change this deferral exists to remove. They go out
+        # through the same :meth:`_publish`, so `_observe` stays one call site
+        # for one policy.
+        #
+        # Every path this hook reports is stamped, not only the one it named:
+        # the stamp is what suppresses the watcher's echo, and after this the
+        # hook really has reported the children too.
+        for target in self._expand(event.path, event.type):
+            self._hook_paths[target] = self._clock()
+            self._publish(
+                event if target == event.path else dataclasses.replace(event, path=target)
+            )
 
     def ingest_fs_change(self, path: str, op_type: str) -> None:
-        """Broadcast a change the watcher saw on disk, attributed if possible.
+        """Hold a change the watcher saw on disk until the hook has had its say.
 
         Three filters keep this from being noise: a path a hook just reported is
         skipped (a Write fires both, and the browser must flash it once); a
@@ -561,20 +704,112 @@ class EventHub:
         tail of the same write, not a second edit; and a directory deletion is
         expanded into the files known to live under it, so `rm -rf src/` empties
         that branch instead of leaving it floating.
+
+        What it does *not* do any more is publish on sight. The watcher knows
+        completeness and at best a guess at authorship; the hook knows the author
+        exactly, and it arrives ~40 ms late because `PostToolUse` fires after the
+        tool has already touched the disk. Publishing here made the hook's own
+        event a *second* event rather than a better description of the same one,
+        and publication cannot be taken back: it fans out to the replay buffer,
+        the recent-changes list, the attention latch and the session counters,
+        and ``SessionStats.observe`` is not invertible. So the change is held for
+        ``_settle_window`` and a hook for the same path supersedes it.
+
+        The suppression filter that was already here is the winning half of the
+        same race, and it stays: an echo a hook has claimed is **dropped**, never
+        deferred, or the flush would publish the very echo it exists to remove, a
+        quarter of a second late.
+
+        Inside the window one transition folds and the rest do not. A repeat of
+        the operation being held, and the `M` that follows an `A` -- writing a
+        file emits created+modified milliseconds apart, which is one write --
+        change nothing and do not reschedule. Anything else flushes what is held
+        first and then holds the new one, in that order, so create-then-delete
+        publishes `A` then `D` and the browser is never handed the deletion of a
+        node it was never given.
+
+        A hub with no scheduler cannot hold anything and publishes as it always
+        did; see :meth:`__init__`.
         """
         if not path or self._recently_hooked(path):
             return
         if op_type == "M" and self._just_reported(path):
             return
+        if self._schedule is None:
+            self._report_fs_change(path, op_type)
+            return
 
+        held = self._pending.get(path)
+        if held is not None:
+            if op_type == held.op or (held.op == "A" and op_type == "M"):
+                return
+            self._flush(path)
+        self._defer(path, op_type)
+
+    # -- internals ---------------------------------------------------------
+    def _defer(self, path: str, op_type: str) -> None:
+        """Hold one change and ask to be woken when its window is up."""
+        assert self._schedule is not None  # only reached from the deferred path
+        handle = self._schedule(self._settle_window, functools.partial(self._flush, path))
+        self._pending[path] = _PendingChange(op=op_type, handle=handle)
+
+    def _flush(self, path: str) -> None:
+        """Publish a held change nobody claimed. Safe on a path holding none.
+
+        The scheduler's own callback, and also what an unfoldable transition
+        calls to get the held change out of the way in order. Cancelling the
+        handle on the way through is what makes those two the same method: a
+        change flushed early must not fire again at the end of its window.
+        """
+        held = self._pending.pop(path, None)
+        if held is None:
+            return
+        held.handle.cancel()
+        self._report_fs_change(path, held.op)
+
+    def _cancel_pending(self, path: str, subtree: bool = False) -> str | None:
+        """Drop what is held for a path, and report the operation it was.
+
+        The operation is returned because the hook that cancelled it may need
+        it: an `A` the watcher saw is evidence of prior non-existence that an
+        `Edit` payload's normalization ran too early to see (see
+        :meth:`ingest_line`).
+
+        ``subtree`` is the regression the deferral introduces, cancelled in the
+        same breath as the deferral itself: a hook deletion of `src` must take
+        every change held under `src/` with it, or they flush afterwards and
+        resurrect files that no longer exist.
+        """
+        cancelled = self._drop_pending(path)
+        if subtree:
+            prefix = path.rstrip("/") + "/"
+            for held in [p for p in self._pending if p.startswith(prefix)]:
+                self._drop_pending(held)
+        return cancelled
+
+    def _drop_pending(self, path: str) -> str | None:
+        held = self._pending.pop(path, None)
+        if held is None:
+            return None
+        held.handle.cancel()
+        return held.op
+
+    def _report_fs_change(self, path: str, op_type: str) -> None:
+        """Draw a watcher change, attributed to whoever is at work *now*.
+
+        The actor is read here rather than when the change arrived, and that is
+        a strict improvement the deferral makes free: a glob-expanding
+        `cp *.md docs/` publishes no event of its own -- `_parse_bash` stays
+        silent rather than inventing a path -- but it does stamp the actor, ~40
+        ms after the copies hit disk. Read at arrival those files are anonymous;
+        read here they are credited to the agent that ran the command.
+        """
         agent, label = self._active_agent()
         for target in self._expand(path, op_type):
             event = fs_event(target, op_type, agent=agent, label=label)
             if event is not None:
                 self._fs_paths[target] = self._clock()
                 self._publish(event)
-
-    # -- internals ---------------------------------------------------------
 
     def _record_agent_state(self, payload: dict) -> None:
         """Publish what this payload says about its agent, if it says anything.
@@ -674,7 +909,15 @@ class EventHub:
         return _encode(event, attention.matches(self._attention, event.path))
 
     def _expand(self, path: str, op_type: str) -> list[str]:
-        """A directory deletion also deletes everything known beneath it."""
+        """A directory deletion also deletes everything known beneath it.
+
+        Both deletions come through here and neither is special-cased: the
+        watcher's, which knows completeness, and the hook's, which knows the
+        author. `rm -rf src/` is one act however it was observed, so it has one
+        answer to "what does that remove", and the order is part of it --
+        children first, so the browser is never left holding nodes whose
+        ancestor has already gone.
+        """
         if op_type != "D":
             return [path]
         prefix = path.rstrip("/") + "/"
@@ -864,6 +1107,18 @@ def completion_response(path: str, home: str) -> dict:
     }
 
 
+def _call_later(delay: float, callback: Callable[[], None]) -> TimerLike:
+    """The daemon's scheduler: ``loop.call_later``, resolved when it is called.
+
+    Lazy on purpose. Capturing a loop in :class:`Session.__init__` would make
+    constructing a session require a running one, and sessions are built at
+    module scope in this suite and inside :func:`run` before anything is served.
+    Only :meth:`EventHub.ingest_fs_change` ever needs the loop, and it always has
+    one: the watcher's thread reaches the hub through ``call_soon_threadsafe``.
+    """
+    return asyncio.get_running_loop().call_later(delay, callback)
+
+
 class Session:
     """The observed project, and everything tied to it, in one place.
 
@@ -905,7 +1160,7 @@ class Session:
         self.allow_remote = allow_remote
         self.attention_rules = attention_rules
         self.root = os.path.normpath(os.path.abspath(project_root))
-        self.hub = EventHub(project_root=self.root)
+        self.hub = EventHub(project_root=self.root, schedule=_call_later)
         self._watcher = None
         self._status_busy = False
         self._stats_busy = False

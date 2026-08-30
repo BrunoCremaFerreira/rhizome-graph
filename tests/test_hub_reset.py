@@ -20,6 +20,14 @@ keeps belongs to the *old* project and is actively wrong for the new one:
   * ``_hook_paths`` / ``_fs_paths`` suppress echoes of changes that happened
     before the switch, so the first real event in the new project can be silently
     swallowed as a duplicate.
+  * ``_pending`` holds the changes the watcher has seen and the hub has not
+    published yet -- deferred for ``FS_SETTLE_SECONDS`` so a hook can supersede
+    them. Left behind, a callback fires a quarter of a second after the switch
+    and publishes a path of the *abandoned* project into a hub whose
+    ``_known_paths`` has just been emptied, so it is drawn as an **add**, in a
+    project where it does not exist, and it is clickable -- a click
+    `resolve_inside` then refuses. Every handle has to be cancelled, not merely
+    forgotten: a forgotten handle still fires.
 
 The clients already on screen must be told: `reset` broadcasts
 ``{"kind": "reset", "root": ...}`` and keeps it in a slot of its own -- exactly
@@ -40,6 +48,7 @@ import json
 from websockets.asyncio.client import connect
 
 from daemon.server import EventHub, start_server
+from fake_scheduler import FakeScheduler
 
 OLD_ROOT = "/proj"
 NEW_ROOT = "/srv/other"
@@ -178,6 +187,29 @@ def test_a_watcher_echo_pending_from_the_previous_project_does_not_swallow_a_new
     hub.ingest_fs_change("src/app.py", "M")
 
     assert [e["type"] for e in _events(hub)] == ["M"]
+
+
+def test_a_change_still_being_held_when_the_root_switches_is_never_published():
+    """A deferred callback outlives the project it belongs to unless it is cancelled.
+
+    This is the one piece of hub state the settle window adds, and it is the
+    piece with the longest fuse: everything else here is wrong the moment it is
+    read, while a pending handle is wrong a quarter of a second *later*, on a
+    graph that has already been cleared and re-seeded. What arrives is a node
+    from the old project, drawn green because the new project has never heard of
+    that path, offering a click that `resolve_inside` refuses.
+
+    Draining after the reset is what makes the assertion mean "cancelled" rather
+    than "not yet fired".
+    """
+    schedule = FakeScheduler()
+    hub = EventHub(project_root=OLD_ROOT, schedule=schedule)
+    hub.ingest_fs_change("src/app.py", "M")
+
+    hub.reset(NEW_ROOT)
+    schedule.drain()
+
+    assert _events(hub) == []
 
 
 def test_resetting_to_the_same_root_still_clears_everything():
