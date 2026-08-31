@@ -79,7 +79,15 @@ LIFECYCLE_EVENTS = ("Notification", "Stop", "SubagentStop")
 #: The tools whose calls must reach the hook. The first four carry authorship
 #: for changes; `Read` is what puts a violet ring on the file an agent opened,
 #: and it is hook-only by nature -- the watcher cannot see a file being read.
-CAPTURED_TOOLS = ("Write", "Edit", "MultiEdit", "Bash", "Read")
+#:
+#: `TodoWrite` buys the only answer in this program to *why*: it is the tool an
+#: agent writes its own plan with, and the item it marks `in_progress` becomes
+#: the caption under that agent's figure. It is also the one matcher here whose
+#: firing rate scales with the **agent's** own work rather than with a human's,
+#: at the same ~40 ms Python process per firing as the rest -- an estimated
+#: 20-60 firings per working session, which is the cost of the feature and the
+#: reason it is argued for separately from the lifecycle events above.
+CAPTURED_TOOLS = ("Write", "Edit", "MultiEdit", "Bash", "Read", "TodoWrite")
 
 #: The matcher those tools spell, which is what a `PostToolUse` entry carries.
 HOOK_MATCHER = "|".join(CAPTURED_TOOLS)

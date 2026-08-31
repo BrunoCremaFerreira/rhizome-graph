@@ -19,6 +19,15 @@
     "edit lands. Reads are hook-only by nature - the filesystem watcher cannot see",
     "them (atime is unreliable under relatime, and it does not subscribe to access",
     "events), so without this block there is no read glow at all.",
+    "It also covers TodoWrite, which changes no file either: it is the tool an",
+    "agent writes its own plan with, and the one item it marks in_progress becomes",
+    "the caption under that agent's figure. It is the only answer this graph has",
+    "to WHY an agent is touching a file - everything else here answers WHERE.",
+    "Its cost is the one to know about, because it is unlike every other matcher",
+    "in this file: its firing rate scales with the AGENT's own work rather than",
+    "with a human's. The price is the same ~40 ms process per firing, estimated at",
+    "20-60 firings in a working session, spread over moments when the model has",
+    "just finished a step. Drop this one entry if you want the graph without it.",
     "Notification, Stop and SubagentStop are not tool calls at all: they are what",
     "puts an agent's LIFE CYCLE on camera, as distinct from its file operations. A",
     "Notification fires when Claude Code needs permission or has gone idle, and",
@@ -31,8 +40,9 @@
     "The cost is one more Python process (about 40 ms, measured on this host) on",
     "the agent's loop per firing. These three are cheap because their firing rate",
     "is bounded by HUMAN actions - a prompt, a turn, a subagent - rather than by",
-    "tool calls, which run in the thousands. That is why these three are installed",
-    "and a matcher whose rate scales with the agent's work is a different trade.",
+    "tool calls, which run in the thousands. A matcher whose rate scales with the",
+    "agent's work is a different trade, and TodoWrite above is the one place this",
+    "file takes it: read the paragraph on it for what it buys and what it costs.",
     "The startup caveat above applies to them too: a session already open keeps",
     "running without these entries.",
     "Env vars (optional): RHIZOME_SOCKET overrides the socket path and must",
@@ -43,7 +53,7 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|Bash|Read",
+        "matcher": "Write|Edit|MultiEdit|Bash|Read|TodoWrite",
         "hooks": [
           {
             "type": "command",

@@ -50,6 +50,10 @@
  * Expected to FAIL until `src/agentState.ts` exists, and -- for the beam
  * relation -- until `BEAM_LIFE_SECONDS` is extracted out of `renderer.ts` into a
  * pure `src/beams.ts` that a test can import.
+ *
+ * That module has since landed, so every group above is green. The one group
+ * still RED is the last: per-ENTRY reference identity, which the caption
+ * feature needs and which the model does not have yet.
  */
 
 import { describe, it, expect } from "vitest";
@@ -218,6 +222,53 @@ describe("applyAgentStates: the same reference when nothing changed", () => {
     const refreshed = applyAgentStates(state, frame(entry("a-1", "waiting", NOW)));
 
     expect(waitingAgents(refreshed, NOW)).toEqual(["a-1"]);
+  });
+});
+
+/**
+ * The identity check one level down: not "did this frame change anything" but
+ * "did it change THIS agent".
+ *
+ * The model-level check above is what keeps a deduped frame or a replay from
+ * repainting every figure. It is not enough on its own, because the daemon
+ * republishes the whole picture whenever ANY agent's entry changes: with three
+ * agents at work, an entry that never moves is still handed to the renderer as
+ * a fresh object several times a minute. Each of those is a canvas and a
+ * texture upload for a caption whose text is identical -- the cost `renameActor`
+ * already refuses to pay when it repaints only on a real change.
+ *
+ * So the property is per entry, and it is asserted by reference rather than by
+ * value: reference identity is the only thing a renderer can cheaply test, and
+ * it is what makes the texture uploads proportional to real changes rather than
+ * to frames.
+ *
+ * The naive `new Map(frame.agents.map(...))` -- which is what the module does
+ * today -- passes every assertion above and fails this one.
+ */
+describe("applyAgentStates: an entry nobody changed is not a repaint", () => {
+  it("leaves the untouched agent's entry identical by reference when another's caption changed", () => {
+    const before = modelOf(
+      entry("a-1", "working", NOW, "developer-backend", "wiring the ingest branch"),
+      entry("a-2", "working", NOW, "developer-frontend", "placing the caption sprite"),
+    );
+    const untouched = before.byAgent.get("a-2");
+
+    const after = applyAgentStates(
+      before,
+      frame(
+        entry("a-1", "working", NOW, "developer-backend", "running the backend suite"),
+        entry("a-2", "working", NOW, "developer-frontend", "placing the caption sprite"),
+      ),
+    );
+
+    // Without these two the property is vacuous: an implementation that simply
+    // returned `state` for every frame, or one that reused every entry object
+    // whatever the frame said, would satisfy the reference check below while
+    // losing the caption that actually changed.
+    expect(after).not.toBe(before);
+    expect(after.byAgent.get("a-1")?.caption).toBe("running the backend suite");
+
+    expect(after.byAgent.get("a-2")).toBe(untouched);
   });
 });
 

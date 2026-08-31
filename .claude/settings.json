@@ -10,6 +10,12 @@
     "Reads (R, violet) are hook-only by nature: the watcher cannot see a file",
     "being opened -- atime is unreliable under relatime and it does not subscribe",
     "to access events -- so without this block there is no read glow at all.",
+    "TodoWrite changes no file either: it is the tool an agent writes its own",
+    "plan with, and the one item it marks in_progress becomes the caption under",
+    "that agent's figure -- the only answer this graph has to WHY, where",
+    "everything else in it answers WHERE. It is also the one matcher here whose",
+    "firing rate scales with the AGENT's own work rather than with a human's, at",
+    "the same ~40 ms process per firing: an estimated 20-60 firings a session.",
     "Claude Code reads settings.json at session start, so a session already open",
     "when this file appears keeps running without it. Restart to pick it up."
   ],
@@ -24,9 +30,9 @@
     "The cost is one more Python process (about 40 ms, measured on this host) on",
     "the agent's loop per firing. These three are cheap because their firing rate",
     "is bounded by HUMAN actions -- a prompt, a turn, a subagent -- rather than",
-    "by tool calls, which run in the thousands. That is why these three are",
-    "installed and a matcher whose rate scales with the agent's work is a",
-    "different trade.",
+    "by tool calls, which run in the thousands. A matcher whose rate scales with",
+    "the agent's work is a different trade, and TodoWrite in the block above is",
+    "the one place this file takes it, for the reason stated there.",
     "The session-start caveat above applies to these entries too: a session",
     "already open keeps running without them."
   ],
@@ -41,7 +47,7 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|Bash|Read",
+        "matcher": "Write|Edit|MultiEdit|Bash|Read|TodoWrite",
         "hooks": [
           {
             "type": "command",

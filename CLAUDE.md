@@ -67,7 +67,8 @@ Data flows through five stages. Keep this separation when adding code.
 2. **Capture** — two sources, deliberately (see "Conventions & gotchas"):
    - `.claude/settings.json` hooks fire `hooks/emit_event.py` and carry the **agent id**.
      `PostToolUse` on `Write` → `A`/`M`, on `Edit`/`MultiEdit` → `M`, on `Bash` → parse the
-     command for `rm`/`rmdir`/`mv`/`mkdir`/`touch`/`cp`, on `Read` → `R`.
+     command for `rm`/`rmdir`/`mv`/`mkdir`/`touch`/`cp`, on `Read` → `R`, and on
+     `TodoWrite` → no event at all, only the caption under the figure.
    - `daemon/watcher.py` (inotify via watchdog) reports **every** change on disk, with no
      idea who caused it.
 3. **Normalize + aggregate** — `daemon/server.py` owns the shared state: the set of seen
@@ -130,7 +131,8 @@ rhizome_graph/status.py     # pure parse of `git status --porcelain -z`, the fan
 rhizome_graph/file_view.py  # what a clicked file shows: diff, else text, else hex
 rhizome_graph/content_search.py # which files hold this string (forks nothing, imports no `re`)
 rhizome_graph/sizes.py      # how big is every file the graph draws (opens nothing, forks nothing)
-rhizome_graph/agentstate.py # pure: what a NON-tool-call payload says about its agent
+rhizome_graph/agentstate.py # pure: what a payload says about its AGENT -- its state, and
+                            # the caption its own TodoWrite derives (fold + cap live here)
 rhizome_graph/session_stats.py # pure: what each agent did this session (counts, capped)
 rhizome_graph/attention.py  # pure-ish: the paths the user asked to be told about (one file, read once)
 rhizome_graph/cli.py        # pure: argv + environ + cwd → frozen Settings; `rhi` itself
@@ -169,6 +171,7 @@ web/src/fileDoc.ts          # pure: what the panel draws — rows, gutter, token
 web/src/highlight.ts        # the ONE place that names shiki (lazy wasm + 22 literal imports)
 web/src/readMarker.ts       # the violet ring a file wears while an agent is reading it
 web/src/agentState.ts       # pure: who is waiting, who has left (both selectors take `now`)
+web/src/agentCaption.ts     # pure: the SAME fold and cap again, in the browser (decision 7)
 web/src/waitMarker.ts       # the BROKEN ring an agent wears while it is blocked on a human
 web/src/attentionState.ts   # pure: the alarm latch -- a SET of what needs looking at, not a stream
 web/src/attentionList.ts    # pure: the alarm panel (order, cap, and what its header has to say)
@@ -336,7 +339,7 @@ authored file here.
 
 Web MVP implemented and verified end-to-end (TDD).
 
-- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1772 pytest green with 20 skipped (1792
+- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1867 pytest green with 20 skipped (1887
   with `RHIZOME_PACKAGE_TESTS=1`, which opts into the slow builds — one wheel, one real `.deb`).
   Hook is stdlib-only and exits 0 on garbage input. Daemon seeds the project tree at boot,
   ingests hook events on a Unix socket, watches the filesystem, and serves `web/dist` over
@@ -747,7 +750,7 @@ Web MVP implemented and verified end-to-end (TDD).
     at all keeps its `.claude/` hidden, since the presence of the file is the switch — the
     answer to give first is the empty file, not a trigger on `.git`, which on this repository
     alone would draw 1 114 files of vendored Python.
-- **Frontend** (`web/`): 1768/1768 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
+- **Frontend** (`web/`): 1795/1795 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
   3.23.0 — 4.x needs Node ≥ 20 and this machine has 18) is the first runtime dependency added
   since `d3-force`; note that `npm install` under npm 10 strips the `libc` fields from
   `package-lock.json`, so check `git diff` on the lock after touching dependencies. Gource-style WebGL
@@ -1331,6 +1334,110 @@ Web MVP implemented and verified end-to-end (TDD).
     a number chosen because it existed. So the panel prints both timestamps and the elapsed
     span, **labelled as a span and not as activity**. The reader does the arithmetic, and the
     span over-reports for an idle agent; stated on screen rather than hidden.
+- **The figure says what the agent thinks it is doing.** The graph answered *where* an agent
+  was working and never *why*; `TodoWrite` is the tool an agent writes its own plan with, and
+  the one item it marks `in_progress` is the cheapest sentence there is about *why*. It is
+  captured, derived into a caption, and painted as a second line above the figure, under the
+  agent's name. It rides the `agentState` frame the life-cycle feature already built -- one
+  per-agent slot for both facts about one actor, never a second frame kind. The staged plan is
+  `docs/features/done/2026-08-26-20-56-todo-caption.md`, and its "As built" section records
+  where the implementation departed from it. Ten things are load-bearing:
+  - **The daemon sends the derived caption, never the list.** Shipping `todos` and letting the
+    browser choose is 1 337 bytes against a few dozen, re-sent on every `TodoWrite` -- worth
+    having, and not the reason. The reason is that "which item is in progress" would then have
+    **two implementations**, the browser's running against a list it also has to validate item
+    by item. This is `content_search.py`'s rule one feature smaller: its frame "carries
+    `[{path, count}]` and nothing else" precisely so the browser is not a second definition of
+    where the matches are. The stated price is R12: the page cannot show the *rest* of the plan
+    without a second round trip.
+  - **`caption_of` is a TRI-STATE, and that is the whole of what makes a caption last longer
+    than a keystroke.** `_record_agent_state` publishes a `working` state on *every* tool call
+    from a known agent, so a `caption_of` answering `""` for an ordinary `Write` would wipe the
+    sentence milliseconds after the `TodoWrite` set it. `None` means *this payload was not about
+    the plan at all* and the hub carries the caption forward; `""` means *this is a `TodoWrite`
+    and nothing is in progress* and the hub clears it. Collapsing the two is the change to
+    refuse. The persistence lives in the **hub** rather than in the classifier, because a
+    caption surviving across payloads is state.
+  - **No in-progress item is an empty caption, never a fabricated one.** Not "idle", not the
+    last completed item, not the first pending one -- an empty caption hides the line and the
+    figure keeps its name. Inventing text is how a graph starts lying quietly: "idle" would be
+    read as a fact about the agent when what actually happened is that the model marked nothing.
+    It is `_parse_bash`'s "when the parser would have to guess, it stays silent", applied to a
+    sentence instead of a path. And the empty caption is **published, not withheld** -- withheld,
+    the browser would keep drawing the previous one forever, which looks exactly like a working
+    feature while describing work that finished an hour ago.
+  - **An agent that has said what it is doing is not nothing.** `_record_agent_state` dropped a
+    `working` state for an agent it had never seen, because publishing it would create a figure
+    from nothing. A `TodoWrite` produces no event at all, so under that rule an agent whose first
+    act is to write down its plan would never reach a client -- which is a common shape, not an
+    edge case. The clause is "carries a caption", never "is a `TodoWrite`": an *empty* caption
+    still is nothing.
+  - **The fold and the cap run TWICE, on one path, and that is not belt and braces.** Two
+    conditions on one path, never two paths: `safe_caption` bounds the wire and protects a
+    browser of another version, `safeCaption` bounds the canvas and protects the page from a
+    *daemon* of another version -- reached by `ssh -L`, through a proxy, or from a different
+    release. Both are written as **removals** rather than replacements, which is what makes them
+    idempotent; a fold that is not idempotent turns defence in depth into a caption mangled once
+    per layer it passes, and that is discovered on a screen rather than in a suite.
+  - **The fold strips controls and bidi, in that order, and is not an ASCII filter.** A C0/C1
+    control folds to a **space** (`fillText` does not break lines: a newline comes back as a
+    missing-glyph box or as nothing, and removing it outright would glue two words the model
+    wrote separately); a bidi mark, embedding, override or isolate is **removed outright**, since
+    those are zero-width and sit inside words. The reason to remove them at all is that the
+    caption sits directly under the agent's **name**, the one string on this page a user trusts
+    to say who is acting, and a RIGHT-TO-LEFT OVERRIDE reverses everything after it. They are
+    spelled one by one, because that is the class a later "simplify the fold" drops first. A jaw
+    pins that accented Latin, CJK and emoji pass through **unchanged** -- reach for
+    `str.isprintable()` and it fails. **No HTML escaping and no quoting**, deliberately: the sink
+    is a canvas and `fillText` cannot execute markup, and a defence against an absent sink is how
+    a reader concludes the real one was never thought about.
+  - **One rule, two languages, one fixture table.** `agentstate.py` and `agentCaption.ts` share
+    no code, so they share `CAPTION_FOLD_CASES` -- the same `(input, folded)` pairs asserted in
+    both suites in the same order, the `matchRanges` / `content_search` device. It carries three
+    **boundary** cases or it pins nothing: exactly `MAX_CAPTION_CHARS`, one past it, and an
+    astral run at an odd offset so a UTF-16 `slice` would land inside a surrogate pair. The cap
+    counts **code points** in both languages; `60` is never restated in the browser, it is
+    implied by the table. One measured divergence is kept and stated: JavaScript counts U+FEFF as
+    whitespace and Python does not, so a BOM is dropped in the browser and survives on the wire
+    -- zero-width either way, and matching exactly would mean hand-spelling a whitespace class.
+  - **A character cap does not bound a canvas, so there are two caps.** `makeLabelTexture` sized
+    `canvas.width` from `ctx.measureText` with **no `Math.min` anywhere** -- a 4 000-character
+    caption asks for 52 012 px at 2x DPR and 78 020 px at 3x, past every browser's maximum
+    dimension and past a typical WebGL `MAX_TEXTURE_SIZE`, allocating 7.5 to 17.5 MiB on the way.
+    Pre-existing, unreachable until this feature (file names come from paths and the agent's name
+    is capped at 24), and worth fixing even if the caption had been dropped. The bound is
+    `MAX_LABEL_TEXTURE_PX` (4 096, the WebGL2 floor) applied in the pure `labelCanvasWidth`, in
+    `makeLabelTexture` **itself** and not in the caption path -- a bound only the caption honours
+    is a bound the next caller will not. **Not a measure-and-retry loop**: that is a loop over
+    untrusted input, in the module with no tests, to compute what one clamp bounds outright. A
+    non-finite measurement contributes **0**, not the bound: a measurement that told us nothing
+    is no reason to allocate the largest texture the platform allows. `MAX_CAPTION_CHARS` x
+    `MAX_FONT_PIXELS` at a full-width glyph plus padding is 3 872 px, and the two limits are
+    asserted **against each other** so neither is retuned alone -- which is also why the audit's
+    proposed 64-character cap was refused: 4 128 px breaks the same assertion.
+  - **The sink is a second sprite in `overlayScene`, and three other candidates lose.** Not a DOM
+    element: the figure moves every frame and the camera moves independently, so it would mean
+    projecting world to screen per agent per frame, from `renderer.ts`, through a new seam that
+    hands screen coordinates out of the one module with no tests. Not the 48-sprite file-label
+    pool: its slots are bound to **paths** and its selection is by heat and zoom, so a caption
+    would vanish exactly when 48 files are hot -- which is when the user most wants to know what
+    the agent thinks it is doing. Not `avatar.ts`: its sprite is in the **bloomed** scene, where
+    text gets the additive halo that closes the counters of its letters. A sibling of the name is
+    outside the bloom **by construction**, is repainted only when its text changes (the
+    `renameActor` rule -- a repaint costs a canvas and a texture upload), and costs one more
+    `placeLabel` per frame. `applyAgentStates` reuses an entry object nobody changed, which is
+    what keeps those uploads proportional to real changes rather than to frames.
+  - **`TodoWrite` is the one matcher whose rate scales with the AGENT's work, not a human's.**
+    ~40 ms of Python process per firing, at an estimated 20-60 firings a session -- 0.8 to 2.4 s
+    of agent-loop latency, in 40 ms pieces at moments when the model has just finished a step.
+    The dedupe is on the **wire** and cannot touch it: the process has been spent before the
+    daemon saw anything, and there is no cheaper place to be -- the hook forwards the envelope and
+    classifies nothing, a filter there would put a `tool_input` parse on the hot path, a
+    `PreToolUse` matcher would fire *more* often, and batching is unavailable because the hook is
+    a process per call by construction. If a real capture says 500 firings, the matcher is to be
+    **reconsidered rather than optimised**. The prose in both settings files that previously said
+    a matcher scaling with the agent's work is a different trade was corrected rather than left
+    contradicting the block beneath it.
 - **The top-right corner is a column now, and that is what keeps a summary off an alarm.**
   `#session-stats` is the second child of `#top-right-column`, with `#size-legend` first;
   `#attention` is untouched. The placement was re-decided during implementation because the
@@ -1667,6 +1774,61 @@ kept that way deliberately, and the shape that would avoid the whole question is
 **no pattern**, only a path already on the graph, which `resolve_inside` already contains. And
 the pre-existing R12/rootError case: a refused command is painted in the observed-root bar, which
 this feature adds no sixth instance of, because it adds no command.
+
+**Not yet verified, for the TodoWrite caption -- and the gap here has the same two halves the
+life-cycle feature has.** Both suites are green, every pure decision is pinned, and the fold was
+cross-checked between the two languages beyond the shared table (the transpiled `agentCaption.ts`
+run against `safe_caption` over 15 table pairs and 17 off-table strings -- NBSP, ideographic
+space, U+200B, C0 separators, a 200-character cut, a 70-rocket astral run, an override mid-word --
+agreeing everywhere except the stated U+FEFF case). But **no `TodoWrite` payload has ever been
+captured**, and this repository's own standard is that a payload shape is settled by capture, not
+by reasoning. Nothing has answered: whether `tool_input.todos` exists and is a list of objects;
+whether those objects carry `content`, `status` and `activeForm`; what the exact `status` values
+are; and -- the one that decides whether the feature lands on the right figure -- **whether a
+subagent's `TodoWrite` carries `agent_id`**. If it does not, its caption falls back to
+`session_id` and lands on the **orchestrator's** figure, which is wrong in the way the life-cycle
+feature's `SubagentStop` asymmetry exists to prevent; the plan says to derive no caption at all in
+that case rather than caption the orchestrator with a subagent's sentence, and that refusal is
+**not built**, because writing it would be guessing at the answer. The five payload strings are
+constants for exactly this reason: a real trace is a five-string edit that moves no test.
+
+The visual half is the usual gap and this host is still a tty. Whether a second line of text under
+every figure is information or clutter, with three agents on a force layout that never settles --
+the fallback, written down so nobody re-derives it, is to caption only the most recently active
+agent, or only on hover. Whether `ACTOR_CAPTION_PIXEL_HEIGHT = 10` against the name's 13 reads as
+*secondary* rather than as *illegible*, through the sharpness discipline `labels.ts` maintains
+(at a device pixel ratio of 1 the raster is clamped to `MIN_FONT_PIXELS = 12` and sampled down to
+10, so the caption really is smaller on screen -- but a ~0.83 downsample is exactly the softness
+that discipline exists to avoid). Whether `ACTOR_CAPTION_LINE_GAP = 0.65` reads as one stacked
+block or as two floating strings. And whether **the name jumping by one line the first time a
+caption arrives** is acceptable -- it is the price of placing every sprite exactly where it was
+before when the caption is `""`, so that an installation without the `TodoWrite` matcher sees no
+change at all; the fix, if it is not, is to reserve the line for actors that have *ever* had a
+caption rather than unconditionally. Whether 60 characters is the right cap is arithmetic from a
+rasterised width, not a judgement made against a real graph at a real zoom. **The tests pin the
+relations and never the values** -- the fold runs before the cap, the two languages agree, the
+pixel bound never clips an in-policy caption -- so retuning any of it is free.
+
+Two more things are asserted from specification rather than measured. That `ctx.fillText` honours
+bidirectional controls, which is why decision 10 does not depend on the answer: the fold costs one
+character class either way. And every canvas figure above -- 52 012 px, 7.54 MiB, 4 096 -- is
+computed from `makeLabelTexture`'s arithmetic and published engine limits. The **absence** of the
+`Math.min` was a fact about the file; that a 52 012 px canvas fails rather than succeeding slowly
+is an inference from documentation.
+
+Four findings from that plan are **noted and not built**, each with its trigger written down in
+`docs/features/done/2026-08-26-20-56-todo-caption.md`: R10, that a caption outlives the work it
+describes when a model finishes without a final `TodoWrite` -- deliberately left to the sibling
+feature's `stopped` state rather than given a second staleness mechanism, since two rules about one
+figure is the outcome to refuse; R11, that the ~40 ms hook cost cannot be deduped away and the only
+lever is the matcher itself, with the trigger being a real firing count high enough that somebody
+notices; R12, that the browser sees one line of a plan it cannot otherwise read -- a panel listing
+an agent's todos is the obvious next feature and this one deliberately does not build toward it,
+and if it is built the list should ship on **request**, a command kind like `sizes`, rather than
+being pushed on every `TodoWrite`; and R13, that a caption is invisible to both searches and to the
+recent-changes list, so "which agent was working on the parser" is not a question the page can
+answer -- both searches are keyed on **paths**, and matching an agent would mean a match that is
+not a node, a camera frame for a figure rather than a file, and a third meaning for `F3`.
 
 **One edit, two events -- fixed on 2026-08-30, and kept here as the record of the
 measurement.** The dedupe between the two capture sources used to be **one-directional**:

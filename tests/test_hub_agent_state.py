@@ -517,3 +517,332 @@ def test_two_subagents_of_one_type_are_two_actors():
     assert sorted(e.get("agent") for e in _entries(hub)) == sorted(
         [SUBAGENT_A, SUBAGENT_B]
     )
+
+
+# ===========================================================================
+# 3. The caption -- what the agent says it is doing
+# ===========================================================================
+#
+# `TodoWrite` is the tool by which an agent writes down its own plan and marks
+# one item `in_progress`. The graph has always answered *where* an agent is
+# working and never *why*, and that one item is the cheapest sentence that
+# answers it -- already written, already in a payload the hook forwards
+# untouched.
+#
+# It rides the slot built above rather than a frame of its own: `caption` is a
+# field on the same per-agent entry that carries `state`, so there is one dedupe,
+# one replay line, one `reset` clause, one parser and one route for both facts
+# about one actor. What is new here is only the field's content.
+#
+# **The `working` guard above gains exactly one clause, and this section is
+# where the reason is visible.** `_record_agent_state` drops a `working` state
+# for an agent it has never seen, because a tool call already says everything
+# such an entry would -- the event it produces builds the figure and names the
+# actor. A `TodoWrite` produces **no event at all**: the normalizer knows the
+# tool not, so nothing is drawn and nothing names the agent. Under the
+# unmodified guard the very first thing an agent says about itself would be
+# dropped, and a caption would only ever appear for an agent that had already
+# been blocked. So the rule becomes: drop a `working` state for an unknown agent
+# only when it carries **no caption**. An agent that has said what it is doing
+# is not "nothing" -- it announced itself.
+#
+# **`caption_of` is a tri-state and the hub is where the third state pays off.**
+# A payload that is not a `TodoWrite` says *nothing about the caption* and the
+# hub carries forward the one it holds; a `TodoWrite` with nothing in progress
+# says *there is nothing in progress* and the hub clears it. Collapsing the two
+# would wipe the caption on the next file the agent touched, milliseconds later.
+#
+# **What this section does NOT restate.** That `reset` forgets the actors of the
+# project left behind -- `test_a_reset_forgets_the_actors_of_the_project_left_behind`
+# above already covers it, and a caption lives on the entry that test asserts is
+# gone. A second copy would be one fact with two homes.
+#
+# The five payload strings are literals here, bound to the classifier's constants
+# by one test, for the reason the module docstring gives for the other four.
+
+#: The tool, and the four keys inside its input. Assumptions, all five: nothing
+#: here has ever captured a `TodoWrite` payload.
+TODO_WRITE = "TodoWrite"
+TODOS = "todos"
+ACTIVE_FORM = "activeForm"
+CONTENT = "content"
+IN_PROGRESS = "in_progress"
+
+#: The status of an item that is not the one being worked on. Only
+#: `in_progress` carries meaning, so this one is not bound to a constant.
+COMPLETED = "completed"
+
+#: A `content` long enough to be cut, with a newline in it so the fold and the
+#: cap are both exercised by one payload -- which is how a real one arrives.
+LONG_CONTENT = ("Rewriting the hub\n" + "abcdefghij" * 50)[:500]
+
+
+def _todo(active_form: str, status: str = IN_PROGRESS) -> dict:
+    """One todo item, in the shape decision 2 assumes."""
+    return {
+        CONTENT: active_form.replace("ing ", " ", 1),
+        ACTIVE_FORM: active_form,
+        "status": status,
+    }
+
+
+def _todo_write(*todos: dict, **fields) -> str:
+    """One raw ingest line for a `TodoWrite`, the payload that carries a plan."""
+    payload: dict = {
+        "session_id": SESSION,
+        EVENT_KEY: "PostToolUse",
+        "tool_name": TODO_WRITE,
+        "tool_input": {TODOS: list(todos)},
+    }
+    payload.update(fields)
+    return json.dumps(payload)
+
+
+def _caption_of(hub: EventHub, agent: str) -> str | None:
+    for entry in _entries(hub):
+        if entry.get("agent") == agent:
+            return entry.get("caption")
+    return None
+
+
+def test_this_file_spells_the_todo_keys_the_classifier_spells():
+    """The one binding point between this file's five literals and the module.
+
+    Step 0 of the plan may correct any of them from a real capture, and when it
+    does this is the only test here that has to change -- which is why every
+    test below spells the literal rather than the import.
+    """
+    agentstate = importlib.import_module("rhizome_graph.agentstate")
+
+    assert (
+        agentstate.TODO_WRITE,
+        agentstate.TODOS,
+        agentstate.ACTIVE_FORM,
+        agentstate.CONTENT,
+        agentstate.IN_PROGRESS,
+    ) == (TODO_WRITE, TODOS, ACTIVE_FORM, CONTENT, IN_PROGRESS)
+
+
+def test_an_agent_nobody_has_seen_yet_gets_a_figure_when_it_says_what_it_is_doing():
+    """The clause the `working` guard gains, and the whole feature rests on it.
+
+    A `TodoWrite` yields no event: the normalizer does not know the tool, so
+    nothing is drawn, nothing names the actor, and the agent is unknown to the
+    hub. Dropped by the guard as written, the first thing an agent ever says
+    about itself would reach no client at all, and a caption would appear only
+    for agents that had previously been blocked -- which is the rarer half of
+    the sessions this feature exists for.
+    """
+    hub = EventHub(project_root=ROOT)
+
+    hub.ingest_line(_todo_write(_todo("Folding the events")))
+
+    assert [(e.get("agent"), e.get("caption")) for e in _entries(hub)] == [
+        (SESSION, "Folding the events")
+    ]
+
+
+def test_an_unknown_agent_with_nothing_to_say_is_still_put_on_camera_by_nothing():
+    """The other jaw: the clause is "carries a caption", not "is a TodoWrite".
+
+    Widening it to every `TodoWrite` would build a figure out of a payload that
+    says nothing -- an agent that opened its plan, marked nothing in progress and
+    has never touched a file, drawn as an actor with an empty caption under it.
+    The existing guard's whole argument is that an entry adding nothing to what
+    the events already say is noise, and an empty caption adds nothing.
+    """
+    hub = EventHub(project_root=ROOT)
+
+    hub.ingest_line(_todo_write(_todo("Folding the events", status=COMPLETED)))
+
+    assert _agent_frames(hub) == []
+
+
+def test_a_todo_write_does_not_make_a_later_write_a_modification():
+    """A caption is even less of a change than a read, and `known_paths` proves it.
+
+    Asserted through the event a client receives rather than through the private
+    set: what matters is what the browser draws, and a file first written after
+    its agent published a plan must still arrive as an add.
+    """
+    hub = EventHub(project_root=ROOT)
+    hub.ingest_line(_todo_write(_todo("Folding the events")))
+    assert _entries(hub), "the TodoWrite produced no agent state at all"
+
+    hub.ingest_line(_write())
+
+    assert _sent(hub)[-1]["type"] == "A"
+
+
+def test_a_todo_write_leaves_the_replayed_event_ring_empty():
+    """It is a slot, so a client connecting later is replayed no event for it.
+
+    A `TodoWrite` names no path, so there is nothing for the tree to hold. Put
+    into `_recent` instead, a plan republished for the life of the session would
+    grow the replay without bound and push the project's own files out of a
+    finite ring.
+    """
+    hub = EventHub(project_root=ROOT)
+
+    hub.ingest_line(_todo_write(_todo("Folding the events")))
+
+    assert _entries(hub), "the TodoWrite produced no agent state at all"
+    assert [m for m in _sent(hub) if "kind" not in m] == []
+
+
+def test_the_caption_a_client_receives_is_the_folded_and_capped_one():
+    """The hub calls `safe_caption`, asserted through its output and not its name.
+
+    Asserting the call itself would pin an implementation; asserting the output
+    survives the derivation moving. What it stops is the caller that puts
+    `caption_of`'s answer straight onto the frame -- a paragraph a model wrote,
+    unbounded, broadcast to every connected browser and rasterised into a canvas
+    sized from its own measured width.
+    """
+    module = importlib.import_module("rhizome_graph.agentstate")
+    hub = EventHub(project_root=ROOT)
+
+    hub.ingest_line(_todo_write(_todo(LONG_CONTENT)))
+
+    assert _caption_of(hub, SESSION) == module.safe_caption(LONG_CONTENT)
+
+
+def test_no_newline_ever_reaches_a_client_inside_a_caption():
+    """The standalone jaw, so this file states the property without importing it.
+
+    `fillText` does not break lines: a newline is handed to the platform shaper
+    and comes back as a missing-glyph box or as nothing, and the caption stops
+    being one line of legible text with no error anywhere.
+    """
+    hub = EventHub(project_root=ROOT)
+
+    hub.ingest_line(_todo_write(_todo(LONG_CONTENT)))
+
+    caption = _caption_of(hub, SESSION)
+    assert caption is not None, "the TodoWrite produced no agent state at all"
+    assert "\n" not in caption
+    assert caption != LONG_CONTENT
+
+
+def test_two_plans_deriving_one_caption_are_broadcast_once():
+    """A model rewriting a description it is not working on costs nothing.
+
+    The commonest `TodoWrite` changes something other than which item is in
+    progress, and the frame is republished for the life of the session, so the
+    dedupe is what makes the matcher affordable at all.
+    """
+
+    def actions(hub: EventHub) -> None:
+        hub.ingest_line(_todo_write(_todo("Folding the events")))
+        hub.ingest_line(
+            _todo_write(
+                _todo("Folding the events"),
+                _todo("Drawing the ring", status=COMPLETED),
+            )
+        )
+
+    frames = [f for f in _watch(actions) if f.get("kind") == "agentState"]
+
+    assert len(frames) == 1
+
+
+def test_a_caption_that_actually_changed_is_broadcast_again():
+    """The other half: a dedupe that swallowed a change would freeze the sentence."""
+
+    def actions(hub: EventHub) -> None:
+        hub.ingest_line(_todo_write(_todo("Folding the events")))
+        hub.ingest_line(_todo_write(_todo("Drawing the ring")))
+
+    frames = [f for f in _watch(actions) if f.get("kind") == "agentState"]
+
+    assert [
+        [(e.get("agent"), e.get("caption")) for e in f.get("agents", [])]
+        for f in frames
+    ] == [[(SESSION, "Folding the events")], [(SESSION, "Drawing the ring")]]
+
+
+def test_a_caption_that_has_become_empty_is_published_rather_than_withheld():
+    """The one an implementation optimises away by accident.
+
+    "There is nothing to say, so send nothing" reads as obviously right and
+    leaves the last sentence standing under a figure describing work that
+    finished an hour ago -- worse than no caption at all, because it looks
+    exactly like a working feature. The agent marked its last item complete;
+    that is a change, and the client has to be told.
+    """
+
+    def actions(hub: EventHub) -> None:
+        hub.ingest_line(_todo_write(_todo("Folding the events")))
+        hub.ingest_line(_todo_write(_todo("Folding the events", status=COMPLETED)))
+
+    frames = [f for f in _watch(actions) if f.get("kind") == "agentState"]
+
+    assert [
+        [(e.get("agent"), e.get("caption")) for e in f.get("agents", [])]
+        for f in frames
+    ] == [[(SESSION, "Folding the events")], [(SESSION, "")]]
+
+
+def test_an_ordinary_tool_call_leaves_the_caption_standing():
+    """The carry-forward, and the defect that would otherwise be found on a screen.
+
+    The hub publishes a `working` state on **every** tool call. If a `Write`
+    answered "there is nothing in progress" rather than "I say nothing about
+    the caption", the sentence an agent wrote would be wiped by the next file it
+    touched -- and since writing files is what agents do between plan updates,
+    no caption would ever be on screen long enough to read.
+    """
+    hub = EventHub(project_root=ROOT)
+    hub.ingest_line(_todo_write(_todo("Folding the events")))
+
+    hub.ingest_line(_write())
+
+    assert _caption_of(hub, SESSION) == "Folding the events"
+
+
+def test_the_caption_follows_the_status_panel_and_precedes_the_tree():
+    """Pairwise, never by absolute index: four planned frames share this gap.
+
+    The order is an argument rather than a list -- clear the canvas, caption the
+    project, then the things *about* the project, then the tree. A caption is a
+    thing about the project's actors, and behind twenty thousand seed events it
+    would appear seconds late on a graph that has already settled.
+    """
+    hub = EventHub(project_root=ROOT)
+
+    hub.set_status({"kind": "status", "repo": True, "truncated": False, "entries": []})
+    hub.ingest_line(_todo_write(_todo("Folding the events")))
+    hub.seed_paths(["src/app.py"])
+
+    kinds = _kinds(hub)
+    assert "agentState" in kinds, "the TodoWrite produced no agent state at all"
+    assert kinds.index("status") < kinds.index("agentState") < kinds.index("event")
+
+
+def test_two_subagents_of_one_type_carry_their_own_captions():
+    """Keyed on the agent, never on the label -- the rule CLAUDE.md states twice.
+
+    Two specialists of one type running at once is the normal shape of a session
+    here, and a dedupe by label would leave one sentence under two figures doing
+    different work, with nothing on screen saying so.
+    """
+    hub = EventHub(project_root=ROOT)
+
+    hub.ingest_line(
+        _todo_write(
+            _todo("Folding the events"),
+            agent_id=SUBAGENT_A,
+            agent_type=SUBAGENT_TYPE,
+        )
+    )
+    hub.ingest_line(
+        _todo_write(
+            _todo("Drawing the ring"),
+            agent_id=SUBAGENT_B,
+            agent_type=SUBAGENT_TYPE,
+        )
+    )
+
+    assert sorted((e.get("agent"), e.get("caption")) for e in _entries(hub)) == sorted(
+        [(SUBAGENT_A, "Folding the events"), (SUBAGENT_B, "Drawing the ring")]
+    )

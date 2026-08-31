@@ -124,8 +124,70 @@ export function spriteHeightForEm(emWorldHeight: number, emFraction: number): nu
 /** Smallest raster size that keeps glyph stems from breaking up. */
 const MIN_FONT_PIXELS = 12;
 
-/** Largest raster size worth storing; beyond it the texture is never sampled. */
-const MAX_FONT_PIXELS = 64;
+/**
+ * Largest raster size worth storing; beyond it the texture is never sampled.
+ *
+ * Exported because it is one half of a coupling: the pixel bound below has to be
+ * wide enough for the longest in-policy caption AT THIS FONT, and a constant a
+ * test cannot import is a coupling nothing pins.
+ */
+export const MAX_FONT_PIXELS = 64;
+
+/**
+ * Widest a label texture may be, in device pixels.
+ *
+ * The bound the renderer's `makeLabelTexture` had none of. It sizes its canvas
+ * from `ctx.measureText(text).width`, so the width of a label was the width of
+ * whatever string the caller happened to hold: a 4 000-character caption asks
+ * for a 52 012 px canvas at 2x device pixel ratio and 78 020 px at 3x -- past
+ * every engine's maximum canvas dimension and past a typical WebGL
+ * `MAX_TEXTURE_SIZE`, with 7.5 to 17.5 MiB allocated on the way to being
+ * rejected or silently clamped, and nothing on screen to say which happened.
+ *
+ * 4 096 is the smallest `MAX_TEXTURE_SIZE` a WebGL2 implementation is permitted
+ * to report, so it is the widest texture every conforming browser can hold. It
+ * is also comfortably above the widest caption policy allows: 60 code points of
+ * full-width glyph at {@link MAX_FONT_PIXELS} plus the renderer's padding is
+ * 3 872 px, so the two limits cannot silently clip each other and
+ * `web/tests/labelTextureBound.test.ts` is what stops either being retuned
+ * alone.
+ */
+export const MAX_LABEL_TEXTURE_PX = 4096;
+
+/**
+ * How wide a canvas one label's texture may be, given what its text measured.
+ *
+ * Extracted from `makeLabelTexture` rather than clamped in place, for this
+ * module's founding reason: the renderer needs a GL context and carries no unit
+ * test by doctrine, so arithmetic left inside it is arithmetic nothing can
+ * assert. The canvas cannot be tested; this can, and this is where the defect
+ * was.
+ *
+ * It is a **clamp and not a truncation loop**. Measuring the text again at a
+ * shorter length until it fits would be a loop over untrusted input, in the
+ * module with no tests, to compute what one comparison bounds outright. Text
+ * past the bound is clipped by the canvas, which is visible and harmless.
+ *
+ * And it is applied to every label -- file names, directory names, the agent's
+ * own name and its caption alike -- because a bound only the caption honours is
+ * a bound the next caller will not honour.
+ *
+ * A measurement that is not a finite positive number contributes nothing rather
+ * than the bound: `Infinity` and `NaN` are what a canvas hands back when a font
+ * failed to load or a context was lost, and allocating the largest texture the
+ * platform allows on the strength of a number that means nothing is exactly the
+ * allocation this function exists to prevent. The answer is still a whole
+ * number of at least one pixel, because `NaN` assigned to `canvas.width` is
+ * coerced to 0 by the DOM -- a blank label, with no error anywhere -- and a
+ * zero-width canvas raises on some engines and rasterises nothing on the rest.
+ */
+export function labelCanvasWidth(measuredWidth: number, pad: number): number {
+  const text = Number.isFinite(measuredWidth) && measuredWidth > 0 ? Math.ceil(measuredWidth) : 0;
+  const padding = Number.isFinite(pad) && pad > 0 ? Math.ceil(pad) : 0;
+  const width = text + padding * 2;
+  if (width < 1) return 1;
+  return width > MAX_LABEL_TEXTURE_PX ? MAX_LABEL_TEXTURE_PX : width;
+}
 
 /**
  * Font size, in device pixels, to rasterise a label texture at.

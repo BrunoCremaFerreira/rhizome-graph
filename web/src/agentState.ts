@@ -116,8 +116,15 @@ export function createAgentStates(): AgentStateModel {
   return { byAgent: new Map<string, AgentEntry>() };
 }
 
-/** Whether two entries say the same thing about the same agent. */
-function sameEntry(a: AgentEntry | undefined, b: AgentEntry): boolean {
+/**
+ * Whether two entries say the same thing about the same agent.
+ *
+ * A type predicate rather than a plain boolean, so the caller may hand back the
+ * entry it compared against without a cast: "nothing moved" and "there is a
+ * previous object to reuse" are one answer, and spelling them as two invites the
+ * next reader to reuse an entry the comparison never approved.
+ */
+function sameEntry(a: AgentEntry | undefined, b: AgentEntry): a is AgentEntry {
   return (
     a !== undefined &&
     a.agent === b.agent &&
@@ -159,7 +166,22 @@ export function applyAgentStates(state: AgentStateModel, frame: AgentStates): Ag
       caption: wire.caption,
       ts: wire.ts,
     };
-    if (!changed && !sameEntry(state.byAgent.get(entry.agent), entry)) changed = true;
+    // The identity check one level down, and it is not the same question as the
+    // one above: that one keeps a deduped frame or a replay from repainting
+    // anything at all, while this one keeps an agent NOBODY touched from being
+    // repainted because a neighbour moved. The daemon republishes the whole
+    // picture whenever any single entry changes, so with three agents at work a
+    // figure that never moves is handed to the renderer as a fresh object
+    // several times a minute -- a canvas and a texture upload each time, for a
+    // caption whose text is identical. Reusing the previous object is what makes
+    // those uploads proportional to real changes rather than to frames, and
+    // reference identity is the only thing a renderer can cheaply test.
+    const previous = state.byAgent.get(entry.agent);
+    if (sameEntry(previous, entry)) {
+      byAgent.set(entry.agent, previous);
+      continue;
+    }
+    changed = true;
     byAgent.set(entry.agent, entry);
   }
 

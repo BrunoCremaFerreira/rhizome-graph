@@ -83,6 +83,7 @@ import {
 } from "./pick";
 import {
   fileLabelOpacity,
+  labelCanvasWidth,
   labelFontPixels,
   labelOffset,
   labelWorldHeight,
@@ -93,6 +94,7 @@ import {
   MAX_FILE_LABELS,
   type LabelCandidate,
 } from "./labels";
+import { captionFor } from "./agentCaption";
 
 /** A transient animated line from an actor to a file it just touched. */
 interface Beam {
@@ -115,6 +117,21 @@ interface ActorView {
   label: Sprite;
   /** Caption currently painted on `label`, so it is repainted only on change. */
   labelText: string;
+  /**
+   * The second line: what the agent last said it was doing, or nothing.
+   *
+   * A sprite of its own in `overlayScene`, beside the name, so it is outside the
+   * bloom BY CONSTRUCTION -- every glyph pixel clears the bloom's 0.05 threshold
+   * and a label left in the main scene gets an additive halo that closes the
+   * counters of its letters. Not `avatar.ts`, whose sprite is in the bloomed
+   * scene; and not the 48-slot file-label pool, whose slots are bound to PATHS
+   * and whose selection is by heat and zoom, so a caption sharing it would
+   * vanish exactly when 48 files are hot -- which is when the user most wants to
+   * know what the agent thinks it is doing.
+   */
+  caption: Sprite;
+  /** Text currently painted on `caption`, so it is repainted only on change. */
+  captionText: string;
   /**
    * The broken ring worn while this agent is blocked, built on first need.
    *
@@ -231,6 +248,32 @@ const ALARM_MARKER_PIXELS = 44;
 const ALARM_MARKER_COLOR = 0xff3333;
 /** Height of the agent figure in world units (a file dot is a few px wide). */
 const AVATAR_WORLD_HEIGHT = 7;
+/**
+ * On-screen height of an agent's caption, in CSS pixels.
+ *
+ * Smaller than `LABEL_PIXEL_HEIGHT`'s 13 on purpose: the caption is
+ * secondary information under a primary identifier, and drawn at the same weight
+ * it would compete with the one string on the page that says WHO is acting.
+ *
+ * Note that `MIN_FONT_PIXELS = 12` clamps the RASTER font and not the on-screen
+ * size -- at a device pixel ratio of 1 the texture is still rasterised at 12 px
+ * and merely sampled down to 10, so the caption really is smaller on screen. Had
+ * the size been taken from the raster font instead, decision 6 would have been
+ * undone silently.
+ *
+ * **Unverified: this host is a tty.** Whether 10 px stays legible through the
+ * sharpness discipline `labels.ts` maintains is a judgement nobody here can
+ * make, and nothing in the tests pins the value.
+ */
+const ACTOR_CAPTION_PIXEL_HEIGHT = 10;
+/**
+ * Gap between the name's line and the caption's, as a fraction of the two em
+ * heights added together.
+ *
+ * Half of that sum is the two lines exactly touching; the excess is the leading.
+ * **Unverified, like the size above.**
+ */
+const ACTOR_CAPTION_LINE_GAP = 0.65;
 /**
  * The layout's pinned centre, where an agent that has done nothing yet stands.
  *
@@ -467,9 +510,15 @@ export class GourceRenderer {
    * thing deciding how many real pixels that is, is the device pixel ratio.
    */
   private readonly labelFont: number;
+  /**
+   * The same, for the caption's smaller line. A second raster size rather than
+   * the name's: a texture rasterised at 13 px and drawn at 10 is sampled below
+   * 1:1, which is the softness `labelFontPixels` exists to avoid.
+   */
+  private readonly captionFont: number;
   private readonly labelAnisotropy: number;
   /** Per-frame label metrics, reused in place so the hot path allocates nothing. */
-  private readonly labelMetrics = { em: 0, offset: 0, worldPerPixel: 0 };
+  private readonly labelMetrics = { em: 0, captionEm: 0, offset: 0, worldPerPixel: 0 };
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -524,6 +573,10 @@ export class GourceRenderer {
     // The renderer clamps the pixel ratio, so this -- not window.devicePixelRatio
     // -- is how many real pixels a CSS pixel of label actually covers.
     this.labelFont = labelFontPixels(this.renderer.getPixelRatio());
+    this.captionFont = labelFontPixels(
+      this.renderer.getPixelRatio(),
+      ACTOR_CAPTION_PIXEL_HEIGHT,
+    );
     this.labelAnisotropy = this.renderer.capabilities.getMaxAnisotropy();
 
     for (let i = 0; i < MAX_FILE_LABELS; i += 1) {
@@ -811,6 +864,13 @@ export class GourceRenderer {
     for (const entry of state.byAgent.values()) {
       if (entry.phase === "stopped" && !departing.includes(entry.agent)) continue;
       this.ensureActor(entry.agent, entry.label);
+    }
+    // Every actor, not only the ones this frame names: an agent the daemon has
+    // stopped reporting has no caption any more, and one whose figure was
+    // created by an event has none until a frame arrives. `captionFor` answers
+    // `""` for both, which is the instruction to draw nothing.
+    for (const actor of this.actors.values()) {
+      this.recaptionActor(actor, captionFor(state, actor.agent));
     }
   }
 
@@ -1185,9 +1245,16 @@ export class GourceRenderer {
         // camera has settled; here we only say whether the name is shown.
         actor.label.visible = true;
         (actor.label.material as SpriteMaterial).opacity = alpha;
+
+        // No in-progress item means an empty caption, never a fabricated one --
+        // not "idle", not the last completed item, not the first pending one. An
+        // empty caption hides the line and the figure keeps its name.
+        actor.caption.visible = actor.captionText !== "";
+        (actor.caption.material as SpriteMaterial).opacity = alpha;
       } else {
         actor.figure.visible = false;
         actor.label.visible = false;
+        actor.caption.visible = false;
       }
       // ease actor toward its most recent beam target
       const beam = this.latestBeamFor(actor.agent);
@@ -1223,6 +1290,8 @@ export class GourceRenderer {
     disposeSprite(actor.figure);
     this.overlayScene.remove(actor.label);
     disposeSprite(actor.label);
+    this.overlayScene.remove(actor.caption);
+    disposeSprite(actor.caption);
     if (actor.waitRing) {
       this.scene.remove(actor.waitRing);
       disposeSprite(actor.waitRing);
@@ -1589,6 +1658,15 @@ export class GourceRenderer {
     sprite.visible = false;
     this.overlayScene.add(sprite);
 
+    // Beside the name, in the same scene and for the same reason. An actor born
+    // of an event rather than of an `agentState` frame may already have a
+    // caption waiting for it, so the text comes from the model that is held
+    // rather than from an empty string it would have to be corrected out of.
+    const captionText = captionFor(this.agentStates, agent);
+    const caption = this.makeLabel(captionText, color, this.captionFont);
+    caption.visible = false;
+    this.overlayScene.add(caption);
+
     const view: ActorView = {
       agent,
       color,
@@ -1598,6 +1676,8 @@ export class GourceRenderer {
       figure,
       label: sprite,
       labelText,
+      caption,
+      captionText,
       waitRing: null,
     };
     this.actors.set(agent, view);
@@ -1625,6 +1705,37 @@ export class GourceRenderer {
     view.label.userData.aspect = aspect;
     view.label.userData.emFraction = emFraction;
     view.labelText = next;
+  }
+
+  /**
+   * Repaint an actor's caption when what it says changes.
+   *
+   * The `renameActor` rule and for its reason: a repaint costs a canvas and a
+   * texture upload, so it is paid per CHANGE and never per frame. Which is why
+   * this is called when a frame is adopted rather than from the render loop --
+   * the daemon dedupes on the encoded message and `applyAgentStates` reuses the
+   * entry object of an agent nobody touched, so the uploads are proportional to
+   * real changes.
+   *
+   * An empty caption is repainted like any other: the sprite is hidden, but the
+   * texture must not go on saying something that is no longer true, or the next
+   * caption to arrive would flash the stale one for a frame.
+   */
+  private recaptionActor(view: ActorView, text: string): void {
+    if (text === view.captionText) return;
+    view.captionText = text;
+
+    const material = view.caption.material as SpriteMaterial;
+    material.map?.dispose();
+    const { texture, aspect, emFraction } = this.makeLabelTexture(
+      text,
+      view.color,
+      this.captionFont,
+    );
+    material.map = texture;
+    material.needsUpdate = true;
+    view.caption.userData.aspect = aspect;
+    view.caption.userData.emFraction = emFraction;
   }
 
   private latestBeamFor(agent: string): Beam | undefined {
@@ -1664,6 +1775,14 @@ export class GourceRenderer {
     // The height the TEXT must occupy; the sprite around it is taller by the
     // texture's padding, which `sizeLabel` adds back.
     metrics.em = labelWorldHeight(this.view.halfHeight, viewportHeight);
+    // The caption's line is shorter, and it is derived from the zoom every frame
+    // like every other size here rather than scaled off `em`: it is a height in
+    // CSS pixels, and that is the parameter `labelWorldHeight` already takes.
+    metrics.captionEm = labelWorldHeight(
+      this.view.halfHeight,
+      viewportHeight,
+      ACTOR_CAPTION_PIXEL_HEIGHT,
+    );
     metrics.offset = labelOffset(metrics.em);
     // World size of one device pixel. Landing a label between two of them is
     // what makes the linear filter smear glyphs even at a 1:1 texture size.
@@ -1684,7 +1803,22 @@ export class GourceRenderer {
 
     for (const actor of this.actors.values()) {
       if (!actor.label.visible) continue;
-      this.placeLabel(actor.label, actor.x, actor.y + AVATAR_WORLD_HEIGHT + metrics.offset, 2);
+      const nameY = actor.y + AVATAR_WORLD_HEIGHT + metrics.offset;
+      if (!actor.caption.visible) {
+        // No caption: everything is placed EXACTLY where it was before this
+        // feature existed, so an installation without the `TodoWrite` matcher
+        // sees no change at all.
+        this.placeLabel(actor.label, actor.x, nameY, 2);
+        continue;
+      }
+      // With one: the name is raised by a line and the caption takes the slot
+      // the name used to hold, so the two read as a stacked block above the
+      // figure. Not below it -- that sandwiches the figure between two lines of
+      // text -- and the line is not reserved unconditionally, which would move
+      // every existing name for a feature most installations do not have.
+      const line = (metrics.em + metrics.captionEm) * ACTOR_CAPTION_LINE_GAP;
+      this.placeLabel(actor.label, actor.x, nameY + line, 2);
+      this.placeLabel(actor.caption, actor.x, nameY, 2, metrics.captionEm);
     }
 
     this.updateFileLabels(model);
@@ -1696,8 +1830,14 @@ export class GourceRenderer {
    * The grid is anchored on the camera centre, so panning slides it with the
    * view instead of re-blurring every name at each intermediate position.
    */
-  private placeLabel(sprite: Sprite, x: number, y: number, z: number): void {
-    const { em, worldPerPixel } = this.labelMetrics;
+  private placeLabel(
+    sprite: Sprite,
+    x: number,
+    y: number,
+    z: number,
+    em = this.labelMetrics.em,
+  ): void {
+    const { worldPerPixel } = this.labelMetrics;
     sprite.position.set(
       snapToPixelGrid(x, this.view.centerX, worldPerPixel),
       snapToPixelGrid(y, this.view.centerY, worldPerPixel),
@@ -1850,16 +1990,22 @@ export class GourceRenderer {
   private makeLabelTexture(
     text: string,
     color: number,
+    font = this.labelFont,
   ): { texture: CanvasTexture; aspect: number; emFraction: number } {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
-    const font = this.labelFont;
     ctx.font = `${font}px system-ui, sans-serif`;
     const metrics = ctx.measureText(text);
     // A quarter of the em box on each side: room for descenders and for the
     // antialiased edge, without spending most of the texture on emptiness.
     const pad = Math.max(2, Math.round(font * 0.25));
-    canvas.width = Math.ceil(metrics.width) + pad * 2;
+    // Through `labelCanvasWidth`, never computed inline: the width of a label
+    // used to be the width of whatever string the caller held, and the caption
+    // is the first caller that hands this a sentence a model wrote. The clamp is
+    // in the pure sibling because this module carries no unit test by doctrine,
+    // and it applies to every label rather than to the caption alone -- a bound
+    // only one caller honours is a bound the next caller will not.
+    canvas.width = labelCanvasWidth(metrics.width, pad);
     canvas.height = font + pad * 2;
     // Resizing the canvas resets the context, so the font has to be set again.
     ctx.font = `${font}px system-ui, sans-serif`;
@@ -1896,8 +2042,8 @@ export class GourceRenderer {
    * current zoom, so that a name stays the same number of pixels tall whether
    * the camera is framing one file or the whole project.
    */
-  private makeLabel(text: string, color: number): Sprite {
-    const { texture, aspect, emFraction } = this.makeLabelTexture(text, color);
+  private makeLabel(text: string, color: number, font = this.labelFont): Sprite {
+    const { texture, aspect, emFraction } = this.makeLabelTexture(text, color, font);
     const material = new SpriteMaterial({ map: texture, transparent: true, depthTest: false, opacity: 0.9 });
     const sprite = new Sprite(material);
     sprite.userData.aspect = aspect;

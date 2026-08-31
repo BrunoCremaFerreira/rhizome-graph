@@ -307,3 +307,115 @@ def test_a_strangers_hook_under_another_event_is_not_a_contest_over_ours():
     answer = module.diagnose(text, WORKING_COMMAND, exists_only(WORKING_COMMAND))
 
     assert answer.state == module.INSTALLED
+
+
+# ===========================================================================
+# 4. The tool that says what an agent is doing
+# ===========================================================================
+#
+# `TodoWrite` is a tool call and so belongs to the `PostToolUse` matcher rather
+# than to a key of its own: it is the tool by which an agent writes down its own
+# plan and marks one item `in_progress`, and that item is the only sentence
+# anywhere in this program that answers *why* an agent is touching a file.
+#
+# **It is the one matcher in either plan whose firing rate scales with the
+# agent's own work rather than with a human's**, which is why it is argued for
+# separately from the three events above. The price is the same ~40 ms process
+# per firing; the estimate is 20-60 firings in a working session, and step 0's
+# trace is what would replace that estimate with a count.
+#
+# Coverage is a **subset**, never a string: the matcher is an alternation, so
+# reordering it or capturing a seventh tool is not a regression. That is the rule
+# `tests/test_capture_settings.py` sets in its own docstring, and the reason two
+# of this section's planned rows are not written here at all -- they say "run the
+# existing test", and `tests/test_capture_settings.py` and
+# `tests/test_hook_install_model.py` were both run green before this section was
+# added. A second copy of an assertion would only be one fact with two homes.
+
+#: The tool, spelled here as a literal and bound to the classifier's constant by
+#: one test below -- the same device this file already uses for the three event
+#: names, and for the same reason: written as an import, every assertion here
+#: would report `AttributeError` and say nothing about the settings files.
+TODO_WRITE = "TodoWrite"
+
+
+def _capture_matchers(settings_file: Path) -> set[str]:
+    """Every tool matched by a `PostToolUse` entry of that file that runs our hook.
+
+    The union over the entries, so splitting the block in two stays legal.
+    """
+    settings = json.loads(settings_file.read_text(encoding="utf-8"))
+    covered: set[str] = set()
+    for entry in settings.get("hooks", {}).get(POST_TOOL_USE, []):
+        commands = " ".join(
+            str(hook.get("command", "")) for hook in entry.get("hooks", [])
+        )
+        if HOOK_SCRIPT not in commands:
+            continue
+        matcher = str(entry.get("matcher", ""))
+        covered |= {part.strip() for part in matcher.split("|") if part.strip()}
+    return covered
+
+
+def _block_matchers(block: dict, event: str) -> set[str]:
+    """Every tool the installer's own block matches under `event`."""
+    covered: set[str] = set()
+    for entry in block.get(event, []):
+        matcher = str(entry.get("matcher", ""))
+        covered |= {part.strip() for part in matcher.split("|") if part.strip()}
+    return covered
+
+
+def test_this_file_names_the_tool_the_classifier_names():
+    """The one binding point between this literal and the classifier's constant.
+
+    Nothing here has ever captured a `TodoWrite` payload, so the tool's name is
+    a constant of `rhizome_graph.agentstate` that a real trace may correct. When
+    it does, this is the only test in this file that has to change.
+    """
+    agentstate = importlib.import_module("rhizome_graph.agentstate")
+
+    assert agentstate.TODO_WRITE == TODO_WRITE
+
+
+def test_the_template_captures_the_tool_that_says_what_an_agent_is_doing():
+    """Subset, never equality: capturing a seventh tool is not a regression."""
+    covered = _capture_matchers(CONFIG_SETTINGS)
+
+    assert {TODO_WRITE} <= covered, (
+        "config/settings.json is what a user copies into the observed project; a "
+        "tool missing from the matcher is captured nowhere and reports nothing. "
+        "The symptom here is a graph whose figures carry no caption at all, "
+        f"which looks exactly like agents that never write a plan. Covered: "
+        f"{sorted(covered)}"
+    )
+
+
+def test_the_installed_block_captures_the_tool_that_says_what_an_agent_is_doing():
+    """The installer and the template must read one list of tools, not two.
+
+    `--install-hooks` writing a narrower matcher than the documented copy-paste
+    would give two users of the same release two different features, with
+    nothing on screen telling either of them which one they have.
+    """
+    block = hookinstall().hook_block(WORKING_COMMAND)
+
+    assert {TODO_WRITE} <= _block_matchers(block, POST_TOOL_USE), (
+        "the installed block's PostToolUse matcher is "
+        f"{sorted(_block_matchers(block, POST_TOOL_USE))}"
+    )
+
+
+def test_this_repository_captures_its_own_agents_plans():
+    """This project observes itself, which is how the first trace gets captured.
+
+    Step 0 of the plan needs a real `TodoWrite` payload and no agent on this host
+    can obtain one from a session that was started before the matcher existed --
+    Claude Code reads the settings at session start. Installing it here is what
+    makes the next session able to answer the question.
+    """
+    covered = _capture_matchers(INSTALLED_SETTINGS)
+
+    assert {TODO_WRITE} <= covered, (
+        f"{INSTALLED_SETTINGS} matches {sorted(covered)} only"
+    )

@@ -74,6 +74,8 @@ from rhizome_graph.agentstate import (
     AgentState,
     agent_state,
     agent_state_frame,
+    caption_of,
+    safe_caption,
 )
 from rhizome_graph import attention
 from rhizome_graph.assets import WEB_DIST_ENV, default_web_dist
@@ -245,7 +247,10 @@ class EventHub:
         same kind, rather than a transient, because a wait is a *state* and not
         a flash: a client connecting a second after the notification must be
         told, or it draws a working figure over a blocked agent and stays wrong
-        until the agent unblocks.
+        until the agent unblocks. The same entry carries the caption an agent's
+        own ``TodoWrite`` derives -- one slot for both facts about one actor,
+        and the reason the caption *survives* a payload that says nothing about
+        it lives in :meth:`_record_agent_state`.
       * ``_attention`` / ``_attention_frame`` -- the paths the user asked to be
         told about, and the header naming the file they came from. A slot of the
         same kind as ``_status``, for the same reason: it is re-published on
@@ -833,13 +838,44 @@ class EventHub:
         false progress, which is a lie the user cannot detect. It also keeps the
         frame quiet: an agent that has never been blocked has nothing to say
         about itself that its events do not already say.
+
+        **That guard carries one exception, and the caption is the whole of
+        it.** A ``TodoWrite`` produces no event at all -- the normalizer knows
+        the tool not, so nothing is drawn and nothing names the actor -- so an
+        agent whose first act is to write down its plan is unknown here, and the
+        rule as written would drop the very first thing it ever said about
+        itself. An agent that has said what it is doing is not "nothing": it
+        announced itself. An *empty* caption still is nothing, which is why the
+        clause is "carries a caption" rather than "is a ``TodoWrite``".
+
+        **The caption's persistence is why this belongs to the hub.**
+        :func:`caption_of` is a tri-state and this is where the third state pays
+        off: ``None`` means the payload says nothing about a caption, so the one
+        already held is carried forward, and only a ``TodoWrite`` with nothing
+        in progress clears it. Collapsing the two would wipe the sentence on the
+        next file the agent touched, milliseconds later, and no caption would
+        ever be on screen long enough to read.
         """
         state = agent_state(payload)
         if state is None:
             return
-        if state.state == WORKING and state.agent not in self._agent_states:
+
+        caption = caption_of(payload)
+        if caption is None:
+            previous = self._agent_states.get(state.agent)
+            caption = previous.caption if previous is not None else ""
+        else:
+            # The one way a caption enters the frame. Straight from
+            # `caption_of`, it would be whatever a model wrote -- unbounded,
+            # broadcast to every client and rasterised into a canvas sized from
+            # its own measured width.
+            caption = safe_caption(caption)
+
+        unknown = state.agent not in self._agent_states
+        if state.state == WORKING and unknown and not caption:
             return
-        self.set_agent_state(state)
+
+        self.set_agent_state(dataclasses.replace(state, caption=caption))
 
     def _broadcast_transient(self, event: Event) -> None:
         """Show an event to whoever is watching now, and remember nothing of it.
