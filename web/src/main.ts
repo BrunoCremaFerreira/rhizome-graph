@@ -86,6 +86,18 @@ import {
   toggleSizeMode,
   type SizeModeState,
 } from "./sizeMode";
+import { interpretSoundKey } from "./soundKeys";
+import {
+  createSound,
+  noteEnded,
+  noteStarted,
+  resetLimiter,
+  shouldRun,
+  toggleSound,
+  voiceFor,
+  type SoundState,
+} from "./sound";
+import { createAudioSink } from "./audio";
 import { createSizeHud } from "./sizeHud";
 import { createStatsHud } from "./statsHud";
 import { interpretStatsKey } from "./statsKeys";
@@ -340,6 +352,16 @@ function boot(): void {
   // two selectors itself, every frame, because both are functions of `now`.
   let agentStates: AgentStateModel = createAgentStates();
 
+  // And the same shape once more for the ambient sound, except that its sink is
+  // the platform rather than the renderer: `sound.ts` owns the toggle, the two
+  // silence rules, the rate floor and the voice budget, and `audio.ts` owns
+  // every call that follows from them. Nothing is constructed here -- the
+  // context is built inside the F9 branch, the one moment a user gesture is
+  // guaranteed -- so a page nobody presses F9 in never touches the audio API at
+  // all.
+  let soundState: SoundState = createSound();
+  const audio = createAudioSink();
+
   function showAgentStates(next: AgentStateModel): void {
     agentStates = next;
     renderer.setAgentStates(agentStates);
@@ -370,6 +392,21 @@ function boot(): void {
       // `setQuery`, so the recount does not throw an F3 walk back to the
       // overview every time an event lands.
       if (search.open && search.query) showSearch(refreshMatches(search, sim.listNodes()));
+      // The sixth consumer, and the only one that answers in a channel with no
+      // scrollback. It comes AFTER `sim.applyEvent`, so a click never describes
+      // a state the page has not reached; it decides nothing here, because a
+      // decision taken in the composition root carries no test by doctrine. The
+      // clock is read here and passed in, which is what keeps `sound.ts` pure.
+      const nowMs = performance.now();
+      const voice = voiceFor(soundState, event, nowMs);
+      if (voice) {
+        soundState = noteStarted(soundState, nowMs);
+        // The budget slot is given back by the platform's own `ended`, not by a
+        // timer: the real end of a note is an event the browser reports.
+        audio.play(voice, () => {
+          soundState = noteEnded(soundState);
+        });
+      }
     },
     resolveWsUrl(),
     {
@@ -458,6 +495,13 @@ function boot(): void {
         // this panel may never guess at.
         attentionRules = null;
         showAttention(resetAttention(attention));
+        // The ONE line in this handler that does not clear something about the
+        // old project. The limiter's clock was set by an event in a project
+        // nobody is watching any more, and the new one's first change must not
+        // be swallowed by it -- but the toggle is a property of the person in
+        // the chair, not of the tree, so it survives. Silencing it here would
+        // mean re-enabling sound every time the user changes what they watch.
+        soundState = resetLimiter(soundState);
         attribution.reset();
         attributionHud?.update(false, false);
         // Only now does the bar close: the switch is confirmed, not merely sent.
@@ -502,6 +546,21 @@ function boot(): void {
     if (interpretStatsKey(event)) {
       event.preventDefault(); // Some browsers and window managers bind the F row.
       showStats(stats, !statsOpen);
+      return;
+    }
+
+    // F9 sits beside F7 and F8 on the same terms: it contests nothing, it is
+    // conditional on nothing, and the toggle has to work with a modal open,
+    // with the root bar focused and with either search bar taking keystrokes --
+    // the states a listener is MOST likely to be in when a noise has stopped
+    // being welcome. The start is written here and nowhere else: a context
+    // constructed outside a user gesture starts suspended and is refused a
+    // resume, so this key press IS the gesture that builds it.
+    if (interpretSoundKey(event)) {
+      event.preventDefault(); // Some browsers and window managers bind the F row.
+      soundState = toggleSound(soundState);
+      if (shouldRun(soundState.enabled, document.hidden)) audio.start();
+      else audio.suspend();
       return;
     }
 
@@ -647,6 +706,19 @@ function boot(): void {
     // The panel's share of the width is measured, not assumed, so it is
     // re-measured whenever the width it is a share of changes.
     renderer.setOccludedRight(fileViewHud?.occludedFraction() ?? 0);
+  });
+
+  // Browsers already throttle audio in background tabs, inconsistently; taking
+  // the decision here makes the behaviour ours rather than the vendor's, and
+  // `shouldRun` is where it is taken so that a test can reach it. Note what
+  // this does NOT cover: a tab behind another APPLICATION is not hidden -- this
+  // event fires for a backgrounded tab, not for an occluded one -- so a user
+  // who switches applications keeps hearing the session, which is arguably the
+  // whole point of the feature. `start()` here is a resume of a context F9
+  // already built, never a first construction.
+  document.addEventListener("visibilitychange", () => {
+    if (shouldRun(soundState.enabled, document.hidden)) audio.start();
+    else audio.suspend();
   });
   renderer.resize();
   renderer.start();

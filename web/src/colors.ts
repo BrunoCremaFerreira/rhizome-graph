@@ -65,15 +65,51 @@ function extensionOf(path: string): string {
   return dot <= 0 ? "" : base.slice(dot + 1).toLowerCase();
 }
 
-/** Deterministic bright color derived from a string (FNV-1a hash → HSL). */
-export function hashColor(key: string): number {
+/**
+ * The raw 32-bit FNV-1a of an agent's identity, under the `actor:` prefix.
+ *
+ * The hash used to be computed and reduced in the same breath — {@link hashColor}
+ * took a key, folded it to `% 360` and returned a colour, so the 32-bit value
+ * never escaped. Any SECOND projection of an agent's identity then had to be
+ * built out of the colour, and a pitch taken as `actorColor(agent) % 15` is
+ * hash mod 360 mod 15: a double reduction that correlates pitch with hue by
+ * arithmetic accident and quietly shrinks the effective table. So the hash is
+ * exposed as a hash and the colour as one projection of it; the sound module's
+ * pitch is the other. Their agreement is then a fact about the code rather than
+ * a claim in a docstring.
+ *
+ * Unsigned, so a caller may take it modulo a table length without discovering
+ * that JavaScript's `%` keeps the sign of its left operand.
+ */
+export function actorHash(agent: string): number {
+  return fnv1a(`actor:${agent}`) >>> 0;
+}
+
+/**
+ * The hue projection: the half of {@link hashColor} that comes after the hash.
+ *
+ * Exported so that `actorColor` can be written as the composition of the two
+ * halves rather than as a second copy of either. `% 360` is what makes every
+ * hash a hue, and 0.7/0.6 are what keep every hue bright enough to read as a
+ * dot on a black field.
+ */
+export function colorFromHash(hash: number): number {
+  return hslToInt((hash >>> 0) % 360, 0.7, 0.6);
+}
+
+/** FNV-1a over the UTF-16 code units of a key. Signed, as `Math.imul` leaves it. */
+function fnv1a(key: string): number {
   let hash = 0x811c9dc5;
   for (let i = 0; i < key.length; i += 1) {
     hash ^= key.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193);
   }
-  const hue = (hash >>> 0) % 360;
-  return hslToInt(hue, 0.7, 0.6);
+  return hash;
+}
+
+/** Deterministic bright color derived from a string (FNV-1a hash → HSL). */
+export function hashColor(key: string): number {
+  return colorFromHash(fnv1a(key));
 }
 
 /**
@@ -93,7 +129,7 @@ export function hashColor(key: string): number {
  * building a row does not want a crash for a value it is about to discard.
  */
 export function actorColor(agent: string): number {
-  return hashColor(`actor:${agent}`);
+  return colorFromHash(actorHash(agent));
 }
 
 /** Color for a file dot: extension palette first, hashed fallback otherwise. */

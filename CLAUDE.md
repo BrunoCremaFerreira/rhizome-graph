@@ -160,6 +160,9 @@ web/src/sizeMode.ts         # pure: the F7 round trip (phases, late-answer refus
 web/src/sizeKeys.ts         # pure: what F7 means (and what a modified or repeating F7 is not)
 web/src/statsPanel.ts       # pure: the session summary's rows (order, swatch, cap, visibility)
 web/src/statsKeys.ts        # pure: what F8 means (and what a modified or repeating F8 is not)
+web/src/sound.ts            # pure: is this event worth hearing, and in whose voice
+web/src/audio.ts            # the ONE place that names AudioContext -- decides nothing, never throws
+web/src/soundKeys.ts        # pure: what F9 means (and what a modified or repeating F9 is not)
 web/src/rootPrompt.ts       # pure: the ctrl+L bar's state (text, completion, discard on Esc)
 web/src/pick.ts             # pure: which file a click (or the resting pointer) landed on
 web/src/labels.ts           # pure: label size/placement, and which files are named this frame
@@ -339,7 +342,7 @@ authored file here.
 
 Web MVP implemented and verified end-to-end (TDD).
 
-- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1867 pytest green with 20 skipped (1887
+- **Backend** (`rhizome_graph/`, `hooks/`, `daemon/`): 1879 pytest green with 20 skipped (1899
   with `RHIZOME_PACKAGE_TESTS=1`, which opts into the slow builds — one wheel, one real `.deb`).
   Hook is stdlib-only and exits 0 on garbage input. Daemon seeds the project tree at boot,
   ingests hook events on a Unix socket, watches the filesystem, and serves `web/dist` over
@@ -750,7 +753,7 @@ Web MVP implemented and verified end-to-end (TDD).
     at all keeps its `.claude/` hidden, since the presence of the file is the switch — the
     answer to give first is the empty file, not a trigger on `.git`, which on this repository
     alone would draw 1 114 files of vendored Python.
-- **Frontend** (`web/`): 1795/1795 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
+- **Frontend** (`web/`): 1856/1856 vitest green, `tsc` + `vite build` clean. `shiki` (pinned to
   3.23.0 — 4.x needs Node ≥ 20 and this machine has 18) is the first runtime dependency added
   since `d3-force`; note that `npm install` under npm 10 strips the `libc` fields from
   `package-lock.json`, so check `git diff` on the lock after touching dependencies. Gource-style WebGL
@@ -1438,6 +1441,109 @@ Web MVP implemented and verified end-to-end (TDD).
     **reconsidered rather than optimised**. The prose in both settings files that previously said
     a matcher scaling with the agent's work is a different trade was corrected rather than left
     contradicting the block beneath it.
+- **F9 makes the session audible, and everything about it is a refusal to be clever.** A short
+  click per write, in a pitch derived from the same hash that gives the agent its colour, off
+  by default and silent until somebody presses the key in *this* tab. The staged plan is
+  `docs/features/done/2026-08-26-20-56-ambient-sound.md`. Nine things are load-bearing:
+  - **The split is FORCED, not chosen, and it is the whole shape of the feature.**
+    `web/vitest.config.ts` runs the front end with `environment: "node"`: there is no audio API
+    in it, and this project's doctrine adds no mock to invent one -- "mock-free, jsdom-free and
+    fast" is the stated reason the shiki boundary exists. So `sound.ts` holds every *decision*
+    and is tested, `audio.ts` holds every *API call* and is not, and `AudioContext` is named in
+    exactly one module, asserted over the source the way "no shiki outside `highlight.ts`" is.
+    **Not one line of `audio.ts` is executed by any test, and none ever will be.** The suite can
+    prove the model asks for the right thing and can never prove the right thing was done.
+  - **Four silence rules, independent, and none is the safety net for the others.** Seeds
+    silent, reads silent, a 40 ms floor (`MIN_VOICE_INTERVAL_MS`) and an 8-voice budget
+    (`MAX_CONCURRENT_VOICES`) -- together they take 200 000 events to 1 961. The seed rule is
+    not the rate limiter's job: a 40 ms floor over a 12 524-event backdrop is not silence, it is
+    twenty-five clicks a second for eight minutes.
+  - **The seed check runs BEFORE the limiter, and that ordering is a test of its own.** The
+    cheap integer comparison first is faster and is what an optimiser would do; under that order
+    the first seed sounds, stamps `lastVoiceMs`, and the real change three milliseconds later is
+    swallowed by a floor that backdrop set. Being silent must cost the limiter nothing.
+  - **A dropped event is dropped, never queued.** There is no pending slot in `SoundState` and
+    no exported function that could drain one -- the export set is pinned at exactly fourteen
+    names, which is the structural half of that rule. A queue turns a burst into a drone that
+    outlives the work it describes, the same lie about "right now" that keeps read flashes out
+    of the daemon's replay buffer.
+  - **A root switch clears the limiter and NOT the toggle, which is the one place this page
+    contradicts its own strongest pattern.** `onReset` clears eight things and every one of them
+    is a fact about the old project; the toggle is a fact about the person in the chair.
+    Silencing it on `ctrl+L` would mean re-enabling sound every time the user changes what they
+    are watching. The clock goes, because the new project's first change must not be swallowed
+    by a floor the old project's last change set. Say both halves, or the next reader assumes
+    "reset clears everything" -- and the behaviour is pinned by `resetLimiter`'s own test, not
+    by the source scan beside it.
+  - **The pitch and the colour are two projections of ONE hash.** `colors.ts` now exports
+    `actorHash` (the raw 32-bit FNV-1a of `actor:<agent>`) and `colorFromHash`, with
+    `actorColor` their composition; a pitch taken from `actorColor(agent) % 15` would be hash
+    mod 360 mod 15, a double reduction correlating pitch with hue by arithmetic accident. **The
+    claim is "the same agent always sounds the same", never "you can tell agents apart by
+    ear"** -- six agents get about five distinct pitches from fifteen notes, and no table size
+    fixes it. An unattributed change gets `DEFAULT_VOICE`, a named constant, never
+    `actorVoice("")`: computing one would invent an identity for somebody who has none.
+  - **The toggle IS the gesture.** No context exists at boot; F9 constructs it *inside* the
+    keydown handler, because a context built outside a gesture starts suspended and is refused a
+    resume. F9 again `suspend()`s, never `close()`s -- a closed context cannot be reopened.
+    `visibilitychange` routes through the pure `shouldRun(enabled, hidden)`. **A window behind
+    another window is not hidden**, so a user who switches applications keeps hearing the
+    session, which is arguably the whole point; a backgrounded *tab* goes quiet.
+  - **`audio.ts` never throws, and gives the budget slot back on every path.** A refused
+    `resume()`, a context the browser will not build, a voice scheduled after suspension: each
+    is silence, and each still calls `onEnded`, or the model wedges silent after eight events.
+    `wsClient.send`'s reason applies unchanged -- this is called straight from a key handler,
+    and an exception thrown out of it leaves the page with a dead keyboard.
+  - **It adds no dependency and 2 020 bytes.** WebAudio is a platform API; a synthesis library
+    and a bundled sample are both refusals with reasons in the plan. The entry chunk went
+    565 251 -> 567 271, half the 4 KiB budget, pinned absolutely (not as a delta) in
+    `tests/test_sound_bundle_budget.py`, which skips when `web/dist` is absent.
+
+**Not yet verified, for the ambient sound -- and here the gap is not one among several, it is
+the feature.** Both suites are green and every pure decision is pinned, but **no sound has been
+produced by any of this**. This host is a tty: no `DISPLAY`, no browser, no audio device. What
+would settle it is somebody sitting with headphones through a real agent session of twenty
+minutes or more, doing something else, and reporting whether they noticed the session's rhythm
+or reached for the key -- and that judgement decides whether the work was worth doing at all.
+If the answer is "turn it off", it is `sound.ts`, `audio.ts`, `soundKeys.ts` and four lines of
+`main.ts`, and nothing else in the tree has changed.
+
+Unheard judgements, every one retunable without touching a test, because the tests pin the
+mapping and the relations and never the values: `MIN_VOICE_INTERVAL_MS = 40` (two figures from
+the perception literature, neither measured here -- ~20 ms for two clicks to fuse, ~25/s for
+clicks to become texture); `MAX_CONCURRENT_VOICES = 8` (summed-amplitude reasoning about sine
+voices); the envelope's 4 ms linear attack into an exponential decay to 0.0001; the 90 ms
+duration and the 0.12 gain; and all fifteen `PITCH_TABLE` offsets, minor pentatonic from A3 so
+that two simultaneous voices stay consonant -- which is music theory, not a measurement of
+whether the result is pleasant at twenty-five events a second.
+
+Asserted from the specification rather than measured: that a context built outside a gesture
+starts suspended, that `resume()` inside a keydown handler succeeds, and that
+`visibilitychange` fires for a backgrounded tab and not for an occluded window. Vendors differ
+on the first two in practice. **And one real gap with a name:** `rhi` opens a WebKitGTK webview
+by default, and whether that backend has a working audio path at all is unknown -- so the
+default way to run this application may be the one way this feature cannot work. It belongs in
+the same spike as the WebGL questions `tools/webview_spike.py` already carries.
+
+**F9 ships undiscoverable, like F8, and for the same reason.**
+`tests/test_bottom_row_width_bounds.py` pins the shortcut legend at exactly 162 characters
+because `CONTEXT_WIDTH_FRACTION = 0.34` and `MIN_SIDE_WIDTH_PX = 231` were measured in a
+browser against exactly that string. This feature's `" - F9: sound"` is twelve characters and
+the stats panel's entry is twenty; both land together at 194 characters, and the measurement is
+taken once for both, at 1280 and 1600, by somebody with a browser.
+
+Two findings from that plan are **noted and not built**, each with its trigger written down in
+`docs/features/done/2026-08-26-20-56-ambient-sound.md`: R7, that the gain is fixed so a busy
+session is louder than a quiet one -- the fix is a compressor or a gain that falls with `live`,
+and the second *inverts* the signal by making a busy moment quieter per event; trigger, the
+first report that a burst is startling rather than annoying, which is a different complaint
+from "the whole thing is maddening" and only the first one is this finding's. And R8, that
+reads are silent so half an agent's work is inaudible -- the read glow exists precisely because
+"the graph used to stay dark through the half of an agent's work that explains the other half",
+and this feature re-opens that gap in the audio channel deliberately; if it is ever built the
+shape is **not** a click per read but a low continuous bed whose amplitude tracks the read
+rate, which is a different synthesis problem and a different plan.
+
 - **The top-right corner is a column now, and that is what keeps a summary off an alarm.**
   `#session-stats` is the second child of `#top-right-column`, with `#size-legend` first;
   `#attention` is untouched. The placement was re-decided during implementation because the
@@ -1592,7 +1698,11 @@ write them, `--attention-rules PATH` (or `RHIZOME_ATTENTION`) to name the file d
 paths deserve a second look — by default `<observed root>/.rhizome-attention`, in git's own
 pattern syntax, absent by default and refused loudly when an explicit path names no readable
 file. `--stats-interval SECONDS` (or `RHIZOME_STATS_INTERVAL`) paces the session-summary poll
-behind F8, 5 s by default and `<= 0` to switch it off entirely. Run, from a checkout: `RHIZOME_PROJECT_ROOT=/path/to/observed ./start.sh`. Point
+behind F8, 5 s by default and `<= 0` to switch it off entirely. **F9 in the page turns on the
+ambient sound** -- a click per write, off by default, per tab, and never remembered between
+page loads; it is bound to no flag and to no environment variable, deliberately, because a
+page that starts making noise on account of something decided in another session is the worst
+failure this feature has available to it. Run, from a checkout: `RHIZOME_PROJECT_ROOT=/path/to/observed ./start.sh`. Point
 the root at the project you want to *watch*, not at `rhizome-graph` — or start anywhere and
 switch with `ctrl+L` in the page (the switch is global: one daemon watches one root, so every
 viewer follows). Install attribution with `rhi --install-hooks`, which never writes without
